@@ -1,0 +1,33 @@
+name: incident-commander
+version: "1.0.0"
+emoji: "🐢"
+colorFrom: blue
+colorTo: gray
+sdk: docker
+description: >
+  Incident Commander OpenEnv where an LLM agent stabilizes a simulated AI
+  platform under deploy failures, traffic spikes, and cascading incidents.
+author: Rohith Kumar
+tags:
+  - openenv
+  - reinforcement-learning
+  - llm-ops
+  - inference
+  - scheduling
+  - sre
+  - agent
+  - rl-environment
+license: mit
+tasks:
+  - name: easy
+    description: Recover a single degraded API service under rising latency
+    difficulty: easy
+  - name: medium
+    description: Handle a bad deploy and traffic surge with rollback and scaling
+    difficulty: medium
+  - name: hard
+    description: Stop a cascading failure across API, inference, and database services
+    difficulty: hard
+  - name: longhaul
+    description: Sustain platform health across repeated incidents and shifting load
+    difficulty: hard
