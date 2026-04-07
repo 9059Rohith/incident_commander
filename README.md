@@ -15,7 +15,7 @@ tags:
   - agent
   - rl-environment
 license: mit
-short_description: LLM agent stabilizing a simulated AI platform during incidents
+short_description: LLM incident response benchmark for AI platforms
 ---
 
 # Incident Commander OpenEnv
