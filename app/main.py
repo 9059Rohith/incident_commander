@@ -32,9 +32,28 @@ def _baseline_action(observation: dict) -> IncidentCommanderAction:
     services = observation.get("services", {})
     frontend = services.get("frontend", {})
     terminal_output = " ".join(observation.get("terminal_output", []))
+    terminal_lower = terminal_output.lower()
 
-    if "packet loss" in terminal_output.lower() or "replication lag" in terminal_output.lower():
+    if "wrong port" in terminal_lower or "connection refused" in terminal_lower:
+        return IncidentCommanderAction(
+            action_type="edit_config_line",
+            config_key="db_port",
+            config_value="5432",
+            note="baseline repair db config drift",
+        )
+
+    if "race condition" in terminal_lower:
+        return IncidentCommanderAction(
+            action_type="rollback_deployment",
+            target_service="auth",
+            note="baseline rollback buggy auth deploy",
+        )
+
+    if "packet loss" in terminal_lower or "replication lag" in terminal_lower:
         return IncidentCommanderAction(action_type="failover_database", note="baseline failover")
+
+    if int(observation.get("step", 0) or 0) < 2:
+        return IncidentCommanderAction(action_type="get_metrics", target_service="frontend", note="baseline initial triage")
 
     if float(frontend.get("observed_error_rate", frontend.get("error_rate", 0.0)) or 0.0) > 0.35:
         return IncidentCommanderAction(action_type="read_last_n_logs", target_service="auth", n_lines=30, note="baseline triage auth logs")
@@ -133,7 +152,12 @@ async def list_tasks():
 
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    return {
+        "status": "ok",
+        "version": app.version,
+        "active_task_contexts": len(envs),
+        "supported_tasks": list(TASKS.keys()),
+    }
 
 
 @app.get("/metrics")

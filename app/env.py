@@ -133,6 +133,7 @@ class IncidentCommanderEnv:
         self.action_counts: Dict[str, int] = defaultdict(int)
         self.last_action_type = "noop"
         self.action_streak = 0
+        self.action_history: List[Tuple[int, str, Optional[str]]] = []
         self.ended_by_budget_failure = False
 
         self._init_state()
@@ -183,6 +184,7 @@ class IncidentCommanderEnv:
         self.action_counts = defaultdict(int)
         self.last_action_type = "noop"
         self.action_streak = 0
+        self.action_history = []
         self.ended_by_budget_failure = False
 
         scenario_id = self._select_scenario()
@@ -204,6 +206,7 @@ class IncidentCommanderEnv:
             return self._get_observation(), self.last_reward, True, {"error": "Episode already done"}
 
         clean_action = self._sanitize_action(action)
+        unresolved_critical_before = sum(1 for i in self.active_incidents if not i.resolved and i.severity == "critical")
         self.action_counts[clean_action.action_type] += 1
 
         if clean_action.action_type == self.last_action_type:
@@ -221,6 +224,8 @@ class IncidentCommanderEnv:
         if incorrect_action:
             self.incorrect_actions += 1
 
+        self._inject_scheduled_incident_event()
+
         self._simulate_scenario_drift()
 
         traffic_profile = self._current_traffic_profile()
@@ -233,6 +238,7 @@ class IncidentCommanderEnv:
 
         self._update_incidents()
         unresolved_critical = sum(1 for i in self.active_incidents if not i.resolved and i.severity == "critical")
+        contradictory_action = self._is_contradictory_action(clean_action, incorrect_action, unresolved_critical_before)
 
         self.sla_breaches += self._sla_breaches_this_step(p95_latency, traffic_profile)
 
@@ -251,6 +257,7 @@ class IncidentCommanderEnv:
 
         burn_budget_ratio = self.downtime_used / max(1e-6, self.burn_budget_total)
         investigation_coverage = len(self.investigation_targets) / 3.0
+        unforced_page = self._is_unforced_page(clean_action, unresolved_critical, traffic_profile, p95_latency)
 
         reward = self.reward_calculator.calculate(
             obs=observation,
@@ -260,11 +267,11 @@ class IncidentCommanderEnv:
             total_incidents=self.total_incidents,
             cost_ratio=budget_ratio,
             uptime_ratio=uptime_ratio,
-            unforced_page=False,
+            unforced_page=unforced_page,
             action_streak=self.action_streak,
             mttr_resolved_ages=[incident.age_steps for incident in self.active_incidents if incident.resolved],
             burn_budget_ratio=burn_budget_ratio,
-            contradictory_action=False,
+            contradictory_action=contradictory_action,
             incorrect_action=incorrect_action,
             unsafe_action=unsafe_action,
             investigation_coverage=investigation_coverage,
@@ -292,6 +299,9 @@ class IncidentCommanderEnv:
                 "investigation_coverage": round(investigation_coverage, 4),
             }
         )
+        self.action_history.append((self.timestep, clean_action.action_type, clean_action.target_service))
+        if len(self.action_history) > 30:
+            self.action_history = self.action_history[-30:]
 
         self.timestep += 1
         self.done = (
@@ -513,6 +523,80 @@ class IncidentCommanderEnv:
 
         if self.scenario.scenario_id == "regional_outage" and not self.scenario.db_failover_complete:
             self.scenario.cross_zone_packet_loss = float(np.clip(self.scenario.cross_zone_packet_loss + 0.03, 0.0, 0.98))
+
+    def _inject_scheduled_incident_event(self) -> None:
+        # Scheduled shocks make long-horizon tasks non-trivial and improve task separation by difficulty.
+        if self.timestep <= 0 or self.timestep not in self.task.incident_schedule:
+            return
+
+        if self.scenario.scenario_id == "resource_exhaustion":
+            self.scenario.noisy_neighbor_io = float(np.clip(self.scenario.noisy_neighbor_io + 0.22, 0.0, 1.2))
+            self.tmp_files.append(f"/tmp/noisy-neighbor-burst-{self.timestep}.tmp")
+            self._append_timeline("Scheduled burst: noisy-neighbor IO intensified")
+            return
+
+        if self.scenario.scenario_id == "config_drift":
+            drift_port = int(15000 + self.rng.integers(200, 3000))
+            self.scenario.db_port_actual = drift_port
+            self.config_runtime["db_port"] = str(drift_port)
+            self._append_timeline("Scheduled drift: auth config regressed to stale DB port")
+            return
+
+        if self.scenario.scenario_id == "heisenbug":
+            self.scenario.heisenbug_armed = True
+            if self._effective_traffic_level() >= self.task.base_traffic * 1.2:
+                self.scenario.heisenbug_triggered = True
+            self._append_timeline("Scheduled fault: race-condition bug re-armed under load")
+            return
+
+        if self.scenario.scenario_id == "regional_outage":
+            self.scenario.db_failover_complete = False
+            self.scenario.cross_zone_packet_loss = float(np.clip(self.scenario.cross_zone_packet_loss + 0.24, 0.0, 0.98))
+            self._append_timeline("Scheduled outage wave: cross-zone packet loss spiked")
+
+    def _is_unforced_page(
+        self,
+        action: IncidentCommanderAction,
+        unresolved_critical: int,
+        traffic_profile: float,
+        p95_latency: float,
+    ) -> bool:
+        if action.action_type != "ask_developer":
+            return False
+        if unresolved_critical > 0:
+            return False
+        if p95_latency >= 250.0:
+            return False
+        return traffic_profile < (self.task.base_traffic * 1.2)
+
+    def _is_contradictory_action(
+        self,
+        action: IncidentCommanderAction,
+        incorrect_action: bool,
+        unresolved_critical_before: int,
+    ) -> bool:
+        if incorrect_action:
+            return False
+
+        if action.action_type == "load_test" and unresolved_critical_before > 0:
+            return True
+
+        if action.action_type == "failover_database" and self.scenario.scenario_id != "regional_outage":
+            return True
+
+        recent = self.action_history[-2:]
+        if len(recent) >= 2 and action.action_type in {"restart_service", "rollback_deployment", "scale_up_replicas"}:
+            same_target_repeats = 0
+            for _, recent_type, recent_target in recent:
+                if recent_type == action.action_type and recent_target == action.target_service:
+                    same_target_repeats += 1
+            if same_target_repeats >= 2:
+                return True
+
+        if action.action_type == "ask_developer" and self.dev_hint_cooldown > 0:
+            return True
+
+        return False
 
     def _current_traffic_profile(self) -> float:
         if self.task.task_id == "easy":
