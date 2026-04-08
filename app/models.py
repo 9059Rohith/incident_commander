@@ -15,10 +15,16 @@ class ServiceState(BaseModel):
     queue_depth: int = 0
     p95_latency: float = 80.0
     error_rate: float = 0.0
+    cpu_utilization: float = 35.0
+    memory_utilization: float = 35.0
     quarantined: bool = False
     rolling_back_steps: int = 0
     scale_cooldown_steps: int = 0
     redirected_fraction: float = 0.0
+    spot_instances: int = 0
+    observed_p95_latency: Optional[float] = None
+    observed_error_rate: Optional[float] = None
+    metric_staleness_steps: int = 0
     last_action_result: str = "idle"
 
 
@@ -77,6 +83,9 @@ class IncidentCommanderReward(BaseModel):
     sla: float
     cost: float
     recovery: float
+    mttr_bonus: float = 0.0
+    burn_budget_penalty: float = 0.0
+    anti_panic_penalty: float = 0.0
 
 
 class TaskConfig(BaseModel):
@@ -88,6 +97,10 @@ class TaskConfig(BaseModel):
     cost_budget: float
     spike_multiplier: float = 1.0
     max_sla_breaches: int = 10
+    observation_noise: float = 0.0
+    spot_disruption_chance: float = 0.0
+    memory_leak_rate: float = 0.0
+    thundering_herd: bool = False
 
 
 class EpisodeResult(BaseModel):
@@ -102,4 +115,6 @@ class EpisodeResult(BaseModel):
     ended_by_budget_failure: bool = False
     action_discipline_score: float = 1.0
     escalations_used: int = 0
+    sla_breaches: int = 0
+    burn_budget_ratio: float = 0.0
     total_score: float

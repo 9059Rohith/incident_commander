@@ -53,26 +53,30 @@ def grade_medium(result: EpisodeResult) -> float:
 
 def grade_hard(result: EpisodeResult) -> float:
     score = (
-        0.34 * result.uptime_score
-        + 0.20 * result.latency_score
-        + 0.21 * result.sla_score
-        + 0.15 * result.cost_score
-        + 0.10 * result.recovery_score
+        0.30 * result.uptime_score
+        + 0.18 * result.latency_score
+        + 0.22 * result.sla_score
+        + 0.14 * result.cost_score
+        + 0.08 * result.recovery_score
     )
     score += _discipline_term(result, low_escalation=2, high_escalation=5)
+    score -= min(0.22, 0.035 * result.sla_breaches)
+    score -= min(0.14, 0.09 * max(0.0, result.burn_budget_ratio - 1.0))
     score -= _failure_penalty(result)
     return _clamp(score)
 
 
 def grade_longhaul(result: EpisodeResult) -> float:
     score = (
-        0.29 * result.uptime_score
-        + 0.20 * result.latency_score
-        + 0.21 * result.sla_score
-        + 0.15 * result.cost_score
-        + 0.15 * result.recovery_score
+        0.24 * result.uptime_score
+        + 0.17 * result.latency_score
+        + 0.24 * result.sla_score
+        + 0.18 * result.cost_score
+        + 0.17 * result.recovery_score
     )
     score += _discipline_term(result, low_escalation=3, high_escalation=6)
+    score -= min(0.28, 0.04 * result.sla_breaches)
+    score -= min(0.18, 0.11 * max(0.0, result.burn_budget_ratio - 1.0))
     score -= _failure_penalty(result)
     return _clamp(score)
 
@@ -80,13 +84,15 @@ def grade_longhaul(result: EpisodeResult) -> float:
 def grade_blackout(result: EpisodeResult) -> float:
     # Blackout prioritizes SLA survival and sustained containment under prolonged pressure.
     score = (
-        0.26 * result.uptime_score
-        + 0.18 * result.latency_score
-        + 0.24 * result.sla_score
-        + 0.16 * result.cost_score
+        0.22 * result.uptime_score
+        + 0.17 * result.latency_score
+        + 0.27 * result.sla_score
+        + 0.18 * result.cost_score
         + 0.16 * result.recovery_score
     )
     score += _discipline_term(result, low_escalation=3, high_escalation=7)
+    score -= min(0.32, 0.045 * result.sla_breaches)
+    score -= min(0.22, 0.13 * max(0.0, result.burn_budget_ratio - 1.0))
     score -= _failure_penalty(result)
     return _clamp(score)
 

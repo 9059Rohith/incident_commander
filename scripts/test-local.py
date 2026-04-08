@@ -63,6 +63,11 @@ def run() -> None:
         for key in ["uptime_score", "latency_score", "sla_score", "cost_score", "recovery_score", "action_discipline_score"]:
             value = float(metrics.get(key, -1))
             _assert(0.0 <= value <= 1.0, f"metric out of range for {task_id}:{key}={value}")
+        trace = metrics.get("reward_trace", [])
+        _assert(isinstance(trace, list), f"reward_trace must be list for {task_id}")
+
+        metrics_no_trace = _get("/metrics", params={"task_id": task_id, "include_trace": "false"})
+        _assert("reward_trace" not in metrics_no_trace, f"reward_trace should be omitted when include_trace=false for {task_id}")
 
     print(json.dumps({"status": "ok", "checked_tasks": TASKS}))
 

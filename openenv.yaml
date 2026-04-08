@@ -29,8 +29,8 @@ tasks:
     description: Stop a cascading failure across API, inference, and database services
     difficulty: hard
   - name: longhaul
-    description: Sustain platform health across repeated incidents and shifting load
+    description: Silent-killer memory leak task requiring proactive recovery before crash
     difficulty: hard
   - name: blackout
-    description: Survive a multi-wave regional outage while preserving SLA and budget
+    description: Thundering-herd regional outage balancing fast scale-up and budget burn
     difficulty: hard

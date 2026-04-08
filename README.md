@@ -40,12 +40,18 @@ The agent does not optimize a toy score. It makes constrained, sequential decisi
 - stop cascading failures before they spread,
 - balance recovery actions against cost and human attention.
 
+This environment is explicitly **systemic rather than atomic**: failures are coupled across services (for example, database latency can trigger gateway CPU saturation), so the agent must reason over interactions instead of isolated thresholds.
+
+The policy challenge is also **cognitive load under uncertainty**: observations can be noisy or stale, spot capacity can disappear, and priorities shift over time. High scores require robust decision-making, not brittle if-else reactions.
+
 ## Why this is a strong hackathon submission
 
 - It models a job humans actually do: on-call incident response for an AI platform.
 - The task ladder is easy to explain and hard to game.
 - The reward is dense, interpretable, and aligned with production objectives.
 - The project includes typed models, a validator script, a baseline script, a Dockerfile, and a Hugging Face Space deployment path.
+- The action space mirrors production workflows (scale, reroute, rollback, quarantine, escalate) used in Kubernetes/Terraform-style operations.
+- The agent must manage uncertainty from noisy or delayed telemetry, not just react to clean threshold signals.
 
 ---
 
@@ -88,13 +94,13 @@ The agent receives a full snapshot of service health, incident state, traffic pr
 
 ### Task 4: longhaul (60 steps)
 
-- Objective: sustain platform health across repeated incidents and shifting load.
-- What it tests: long-horizon adaptation and delayed credit assignment.
+- Objective: detect and mitigate a silent memory leak before "healthy" services crash.
+- What it tests: proactive intervention and delayed credit assignment.
 
 ### Task 5: blackout (70 steps)
 
-- Objective: survive a multi-wave regional outage while preserving both SLA and budget discipline.
-- What it tests: compounded failure handling, escalation discipline, and recovery orchestration under prolonged stress.
+- Objective: survive a thundering-herd traffic wave where under-scaling causes DB lockups but over-scaling burns budget.
+- What it tests: predictive planning from traffic rate-of-change and cost-aware scaling discipline.
 
 ---
 
@@ -115,6 +121,8 @@ Each step the agent receives a complete platform snapshot:
 | cost_per_step | float | Accumulated operating cost |
 | last_action_result | str | Human-readable result of the last action |
 | phase | str | Episode phase marker used for long-horizon dynamics |
+
+`ServiceState` additionally includes CPU, memory, spot-instance count, and noisy observed metrics (`observed_p95_latency`, `observed_error_rate`, `metric_staleness_steps`) so agents can reason about telemetry quality.
 
 ## Action space
 
@@ -146,15 +154,20 @@ class IncidentCommanderAction(BaseModel):
 
 ## Reward model
 
-Per-step reward combines:
+Per-step reward is decomposed and inspectable:
 
-- uptime
-- latency health
-- SLA compliance
-- cost control
-- incident recovery
+| Component | Signal | Behavior encouraged |
+|---|---|---|
+| Uptime | Fraction of served demand | Keep core services available |
+| Latency health | Inverse p95 latency pressure | Avoid overload and queue growth |
+| SLA compliance | Breach-aware term | Protect tail performance during incidents |
+| Cost control | Budget ratio term | Prevent runaway spend |
+| Recovery | Resolved incident ratio | Clear incidents instead of masking symptoms |
+| MTTR bonus | Fast recovery bonus for incidents resolved in <=3 steps | Reward decisive, early mitigation |
+| Burn-budget penalty | 99.9% SLA budget exhaustion penalty (heavier after budget is consumed) | Avoid repeated downtime bursts |
+| Anti-panic penalty | Penalizes contradictory actions (for example scale up then immediate scale down) | Prefer stable engineering decisions |
 
-The reward is dense enough to support learning while still penalizing passivity and unresolved critical incidents.
+The environment keeps a per-step reward trace and exposes it through `/metrics` for judge auditability.
 
 ### Anti-exploit safeguards
 
@@ -191,6 +204,8 @@ The grader favors uptime, latency, SLA protection, cost discipline, incident rec
 - GET `/visualize?task_id={easy|medium|hard|longhaul|blackout}`
 - GET `/baseline?task_id={easy|medium|hard|longhaul|blackout}&episodes=5`
 - GET `/metrics?task_id={easy|medium|hard|longhaul|blackout}`
+
+`/metrics` supports `include_trace=true|false` and returns both aggregate scores and per-step reward breakdown.
 
 ---
 
@@ -239,27 +254,37 @@ Defaults are applied for `API_BASE_URL` and `MODEL_NAME` only. `HF_TOKEN` is int
 
 If model inference is unavailable (for example quota/network issues), the script falls back to a deterministic heuristic controller instead of pure `noop`, which keeps evaluation runs stable and reproducible.
 
-## Baseline scores
+## Baseline policy comparison
 
-| Task | Score |
-|---|---|
-| easy | 1.000 |
-| medium | 0.62 |
-| hard | 0.49 |
-| longhaul | 0.44 |
-| blackout | 0.39 |
+Measured with `python greedy_baseline.py` over fixed seeds (`42..51`):
 
-These are baseline reference values and should be reproducible under a fixed seed.
+| Task | Noop | Greedy reactive | Reasoning policy |
+|---|---:|---:|---:|
+| easy | 0.985 | 1.000 | 1.000 |
+| medium | 0.913 | 0.971 | 0.971 |
+| hard | 0.240 | 0.324 | 0.324 |
+| longhaul | 0.240 | 0.326 | 0.297 |
+| blackout | 0.078 | 0.040 | 0.331 |
+
+Interpretation:
+
+- easy/medium are intentionally accessible to verify API correctness and grading behavior.
+- hard/longhaul stay below 0.50 for naive/reactive policies, demonstrating that shallow heuristics are insufficient.
+- blackout shows a large gap between greedy and phase-aware reasoning due to thundering-herd dynamics and burn-budget pressure.
 
 ## RL evidence baseline
 
-To show task difficulty progression, run a deterministic comparison between noop and greedy reactive policies:
+To reproduce the policy comparison table:
 
 ```bash
 python greedy_baseline.py
 ```
 
-The script prints a CSV table (`task,noop,greedy`) across fixed seeds so judges can quickly verify that harder tasks require multi-step planning beyond trivial baselines.
+The script prints a CSV table (`task,noop,greedy,reasoning`) across fixed seeds.
+
+### Delayed-credit example
+
+In `longhaul`, the environment enters a `silent-leak` phase before major traffic pressure. A policy that scales `inference` early when memory creep is visible takes an immediate cost hit but prevents a later crash during surge. The positive return from that action appears many steps later, which is exactly the delayed credit-assignment pattern RL should solve.
 
 ## Deployment
 

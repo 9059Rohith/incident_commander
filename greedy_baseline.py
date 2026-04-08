@@ -63,6 +63,45 @@ def greedy_policy(obs: IncidentCommanderObservation) -> IncidentCommanderAction:
     return IncidentCommanderAction(action_type="noop", note="stable")
 
 
+class ReasoningPolicy:
+    def __init__(self) -> None:
+        self.last_traffic = 0.0
+
+    def __call__(self, obs: IncidentCommanderObservation) -> IncidentCommanderAction:
+        traffic_roc = float(obs.traffic_level - self.last_traffic)
+        self.last_traffic = float(obs.traffic_level)
+
+        inference = obs.services.get("inference")
+        database = obs.services.get("database")
+
+        if inference and obs.phase == "silent-leak" and inference.memory_utilization > 76:
+            return IncidentCommanderAction(
+                action_type="scale_service",
+                target_service="inference",
+                delta_instances=1,
+                note="silent leak headroom",
+            )
+
+        if obs.phase == "thundering-herd" and traffic_roc > 0.1:
+            if database and database.instances < 4:
+                return IncidentCommanderAction(
+                    action_type="scale_service",
+                    target_service="database",
+                    delta_instances=1,
+                    note="protect db under herd pressure",
+                )
+            if inference and inference.instances < 7:
+                return IncidentCommanderAction(
+                    action_type="scale_service",
+                    target_service="inference",
+                    delta_instances=1,
+                    note="predictive scale for herd",
+                )
+
+        # Fall back to the strong reactive baseline for everything else.
+        return greedy_policy(obs)
+
+
 def run_episode(task_id: str, seed: int, policy: PolicyFn) -> float:
     env = IncidentCommanderEnv(TASKS[task_id], seed=seed)
     obs = env.reset(seed=seed)
@@ -77,18 +116,20 @@ def run_episode(task_id: str, seed: int, policy: PolicyFn) -> float:
 def benchmark(task_id: str, seeds: List[int]) -> Dict[str, float]:
     noop_scores = [run_episode(task_id, seed, noop_policy) for seed in seeds]
     greedy_scores = [run_episode(task_id, seed, greedy_policy) for seed in seeds]
+    reasoning_scores = [run_episode(task_id, seed, ReasoningPolicy()) for seed in seeds]
     return {
         "noop": round(mean(noop_scores), 3),
         "greedy": round(mean(greedy_scores), 3),
+        "reasoning": round(mean(reasoning_scores), 3),
     }
 
 
 def main() -> None:
     seeds = list(range(42, 52))
-    print("task,noop,greedy")
+    print("task,noop,greedy,reasoning")
     for task_id in TASKS:
         result = benchmark(task_id, seeds)
-        print(f"{task_id},{result['noop']:.3f},{result['greedy']:.3f}")
+        print(f"{task_id},{result['noop']:.3f},{result['greedy']:.3f},{result['reasoning']:.3f}")
 
 
 if __name__ == "__main__":

@@ -17,8 +17,8 @@ TASK_DESCRIPTIONS = {
     "easy": "Recover a single degraded API service under rising latency",
     "medium": "Handle a bad deploy and traffic surge with rollback and scaling",
     "hard": "Stop a cascading failure across API, inference, and database services",
-    "longhaul": "Sustain platform health across repeated incidents and shifting load",
-    "blackout": "Survive a multi-wave regional outage while preserving SLA and budget",
+    "longhaul": "Silent-killer memory leak: keep healthy services from crashing under creeping memory pressure",
+    "blackout": "Thundering-herd outage: scale fast enough to prevent DB lockup without blowing budget",
 }
 
 
@@ -135,18 +135,38 @@ async def health():
 
 
 @app.get("/metrics")
-async def metrics(task_id: str = "easy"):
+async def metrics(task_id: str = "easy", include_trace: bool = True):
     env = _get_env(task_id)
-    return env.get_metrics()
+    payload = env.get_metrics()
+    if not include_trace:
+        payload = dict(payload)
+        payload.pop("reward_trace", None)
+    return payload
 
 
 @app.get("/visualize")
 async def visualize(task_id: str = "easy"):
     env = _get_env(task_id)
-    lines = []
-    for name, service in env.services.items():
-        bar = "#" * service.instances + "-" * max(0, 8 - service.instances)
-        lines.append(f"{name[:10]:<10} |{bar}| latency={service.p95_latency:.0f}ms error={service.error_rate:.2f} quarantined={service.quarantined}")
+    header = "[SERVICES]  STAT | CPU | MEM | LATENCY | COST | NOTES"
+    lines = [header]
+    for name in ("gateway", "inference", "database"):
+        service = env.services[name]
+        status = "UP" if service.healthy else "DEG"
+        cost_tag = "$" * max(1, service.instances - service.spot_instances) + ("s" * service.spot_instances)
+        note = service.last_action_result
+        if name == "database" and service.p95_latency > 250:
+            note = "ROOT CAUSE? " + note
+
+        lines.append(
+            f"{name:<10} {status:<4} | {service.cpu_utilization:>3.0f}% | {service.memory_utilization:>3.0f}% | "
+            f"{service.p95_latency:>6.0f}ms | {cost_tag:<5} | {note}"
+        )
+
+    lines.append("")
+    lines.append(
+        f"phase={env.phase} step={env.timestep}/{env.task.max_steps} incidents={sum(1 for i in env.active_incidents if not i.resolved)} "
+        f"sla_breaches={env.sla_breaches}"
+    )
     return {"task_id": task_id, "ascii": "\n".join(lines)}
 
 
