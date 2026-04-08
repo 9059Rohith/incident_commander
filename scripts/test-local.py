@@ -64,8 +64,23 @@ def run() -> None:
         trace = metrics.get("reward_trace", [])
         _assert(isinstance(trace, list), f"reward_trace must be list for {task_id}")
 
+        metrics_with_trace = _get("/metrics", params={"task_id": task_id, "include_trace": "true"})
+        _assert(isinstance(metrics_with_trace.get("reward_trace", None), list), f"reward_trace should be present when include_trace=true for {task_id}")
+
         metrics_no_trace = _get("/metrics", params={"task_id": task_id, "include_trace": "false"})
         _assert("reward_trace" not in metrics_no_trace, f"reward_trace should be omitted when include_trace=false for {task_id}")
+
+        viz = _get("/visualize", params={"task_id": task_id})
+        _assert(viz.get("task_id") == task_id, f"visualize task mismatch for {task_id}")
+        _assert("ascii" in viz and isinstance(viz["ascii"], str) and len(viz["ascii"]) > 0, f"visualize ascii missing for {task_id}")
+
+        baseline = _get("/baseline", params={"task_id": task_id, "episodes": 2})
+        _assert(baseline.get("task_id") == task_id, f"baseline task mismatch for {task_id}")
+        _assert(int(baseline.get("episodes", 0)) == 2, f"baseline episodes mismatch for {task_id}")
+        baseline_avg = float(baseline.get("avg_score", -1))
+        _assert(0.0 <= baseline_avg <= 1.0, f"baseline avg score out of range for {task_id}: {baseline_avg}")
+        baseline_scores = baseline.get("scores", [])
+        _assert(isinstance(baseline_scores, list) and len(baseline_scores) == 2, f"baseline scores malformed for {task_id}")
 
     print(json.dumps({"status": "ok", "checked_tasks": TASKS}))
 
