@@ -209,6 +209,18 @@ bash scripts/validate-submission.sh https://your-space.hf.space .
 
 The validator checks the live Space, Docker build, and OpenEnv validation.
 
+For local API smoke testing (run server first):
+
+```bash
+python scripts/test-local.py
+```
+
+You can also run OpenEnv validation directly from the repo root:
+
+```bash
+openenv validate
+```
+
 ## Inference
 
 ```bash

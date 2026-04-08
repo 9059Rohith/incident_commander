@@ -72,4 +72,5 @@ if __name__ == "__main__":
         run()
     except Exception as exc:
         print(f"test-local failed: {exc}")
+        print("hint: start the server first, e.g. `python -m uvicorn app.main:app --host 0.0.0.0 --port 7860`")
         sys.exit(1)
