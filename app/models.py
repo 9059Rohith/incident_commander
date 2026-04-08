@@ -80,13 +80,14 @@ class IncidentCommanderReward(BaseModel):
 
 
 class TaskConfig(BaseModel):
-    task_id: Literal["easy", "medium", "hard", "longhaul"]
+    task_id: Literal["easy", "medium", "hard", "longhaul", "blackout"]
     max_steps: int
     base_traffic: float
     peak_traffic: float
     incident_schedule: List[int]
     cost_budget: float
     spike_multiplier: float = 1.0
+    max_sla_breaches: int = 10
 
 
 class EpisodeResult(BaseModel):
@@ -98,4 +99,7 @@ class EpisodeResult(BaseModel):
     recovery_score: float
     incident_clearance_rate: float
     ended_by_sla_failure: bool
+    ended_by_budget_failure: bool = False
+    action_discipline_score: float = 1.0
+    escalations_used: int = 0
     total_score: float

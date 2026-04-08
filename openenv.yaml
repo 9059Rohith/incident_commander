@@ -31,3 +31,6 @@ tasks:
   - name: longhaul
     description: Sustain platform health across repeated incidents and shifting load
     difficulty: hard
+  - name: blackout
+    description: Survive a multi-wave regional outage while preserving SLA and budget
+    difficulty: hard

@@ -13,12 +13,40 @@ from server.tasks import GRADERS
 app = FastAPI(title="Incident Commander OpenEnv", version="1.0.0")
 
 envs: Dict[str, IncidentCommanderEnv] = {}
+TASK_DESCRIPTIONS = {
+    "easy": "Recover a single degraded API service under rising latency",
+    "medium": "Handle a bad deploy and traffic surge with rollback and scaling",
+    "hard": "Stop a cascading failure across API, inference, and database services",
+    "longhaul": "Sustain platform health across repeated incidents and shifting load",
+    "blackout": "Survive a multi-wave regional outage while preserving SLA and budget",
+}
 
 
 def _get_env(task_id: str) -> IncidentCommanderEnv:
     if task_id not in envs:
         raise HTTPException(status_code=400, detail="Call /reset first")
     return envs[task_id]
+
+
+def _baseline_action(observation: dict) -> IncidentCommanderAction:
+    incidents = [incident for incident in observation.get("active_incidents", []) if not incident.get("resolved", False)]
+    critical = [incident for incident in incidents if incident.get("severity") == "critical"]
+    if critical:
+        service = critical[0].get("service")
+        if service:
+            return IncidentCommanderAction(action_type="quarantine_service", target_service=service, note="baseline critical containment")
+
+    for incident in incidents:
+        service = incident.get("service")
+        incident_type = incident.get("incident_type")
+        if incident_type == "bad_deploy" and service:
+            return IncidentCommanderAction(action_type="rollback_deploy", target_service=service, target_version="v0", note="baseline rollback")
+        if incident_type in {"node_failure", "cache_thrash"} and service:
+            return IncidentCommanderAction(action_type="scale_service", target_service=service, delta_instances=2, note="baseline scale")
+
+    if float(observation.get("p95_latency", 0.0) or 0.0) > 260:
+        return IncidentCommanderAction(action_type="scale_service", target_service="inference", delta_instances=1, note="baseline latency scale")
+    return IncidentCommanderAction(action_type="noop", note="baseline noop")
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -93,12 +121,7 @@ async def list_tasks():
         "tasks": [
             {
                 "id": task_id,
-                "description": {
-                    "easy": "Recover a single degraded API service under rising latency",
-                    "medium": "Handle a bad deploy and traffic surge with rollback and scaling",
-                    "hard": "Stop a cascading failure across API, inference, and database services",
-                    "longhaul": "Sustain platform health across repeated incidents and shifting load",
-                }[task_id],
+                "description": TASK_DESCRIPTIONS[task_id],
                 "max_steps": task.max_steps,
             }
             for task_id, task in TASKS.items()
@@ -138,7 +161,7 @@ async def baseline(task_id: str = "easy", episodes: int = 5):
         env = IncidentCommanderEnv(TASKS[task_id], seed=seed)
         obs = env.reset(seed=seed)
         while not env.done:
-            action = IncidentCommanderAction(action_type="noop")
+            action = _baseline_action(obs.model_dump())
             obs, _, done, _ = env.step(action)
             if done:
                 break

@@ -26,6 +26,7 @@ TASKS: Dict[str, TaskConfig] = {
         incident_schedule=[0],
         cost_budget=0.55,
         spike_multiplier=1.2,
+        max_sla_breaches=10,
     ),
     "medium": TaskConfig(
         task_id="medium",
@@ -35,6 +36,7 @@ TASKS: Dict[str, TaskConfig] = {
         incident_schedule=[0, 7],
         cost_budget=0.65,
         spike_multiplier=1.45,
+        max_sla_breaches=9,
     ),
     "hard": TaskConfig(
         task_id="hard",
@@ -44,6 +46,7 @@ TASKS: Dict[str, TaskConfig] = {
         incident_schedule=[0, 4, 10],
         cost_budget=0.72,
         spike_multiplier=1.65,
+        max_sla_breaches=8,
     ),
     "longhaul": TaskConfig(
         task_id="longhaul",
@@ -53,6 +56,17 @@ TASKS: Dict[str, TaskConfig] = {
         incident_schedule=[0, 8, 18, 30, 42, 50],
         cost_budget=0.78,
         spike_multiplier=1.8,
+        max_sla_breaches=8,
+    ),
+    "blackout": TaskConfig(
+        task_id="blackout",
+        max_steps=70,
+        base_traffic=1.15,
+        peak_traffic=2.55,
+        incident_schedule=[0, 5, 11, 17, 26, 34, 41, 50, 60],
+        cost_budget=0.86,
+        spike_multiplier=2.05,
+        max_sla_breaches=7,
     ),
 }
 
@@ -77,6 +91,18 @@ class IncidentCommanderEnv:
         self.latency_history: List[float] = []
         self.phase = "steady"
         self.human_attention_steps = 0
+        self.unforced_pages = 0
+        self.last_action_type = "noop"
+        self.action_streak = 0
+        self.ended_by_budget_failure = False
+        self.action_counts = {
+            "scale_service": 0,
+            "reroute_traffic": 0,
+            "rollback_deploy": 0,
+            "quarantine_service": 0,
+            "page_human": 0,
+            "noop": 0,
+        }
         self._init_state()
 
     def _init_state(self) -> None:
@@ -97,6 +123,18 @@ class IncidentCommanderEnv:
         self.latency_history = []
         self.phase = "steady"
         self.human_attention_steps = 0
+        self.unforced_pages = 0
+        self.last_action_type = "noop"
+        self.action_streak = 0
+        self.ended_by_budget_failure = False
+        self.action_counts = {
+            "scale_service": 0,
+            "reroute_traffic": 0,
+            "rollback_deploy": 0,
+            "quarantine_service": 0,
+            "page_human": 0,
+            "noop": 0,
+        }
 
     def reset(self, seed: Optional[int] = None) -> IncidentCommanderObservation:
         if seed is not None:
@@ -112,6 +150,24 @@ class IncidentCommanderEnv:
             return self._get_observation(), self.last_reward, True, {"error": "Episode already done"}
 
         clean_action = self._sanitize_action(action)
+        unresolved_high_or_critical = sum(
+            1
+            for incident in self.active_incidents
+            if not incident.resolved and incident.severity in {"high", "critical"}
+        )
+        unforced_page = clean_action.action_type == "page_human" and unresolved_high_or_critical == 0
+        if unforced_page:
+            self.unforced_pages += 1
+
+        if clean_action.action_type == self.last_action_type:
+            self.action_streak += 1
+        else:
+            self.action_streak = 1
+            self.last_action_type = clean_action.action_type
+
+        if clean_action.action_type in self.action_counts:
+            self.action_counts[clean_action.action_type] += 1
+
         action_result = self._apply_action(clean_action)
         self._advance_incidents()
         self._spawn_scheduled_incidents(step_index=self.timestep)
@@ -131,20 +187,33 @@ class IncidentCommanderEnv:
         self.sla_breaches += self._sla_breaches_this_step(p95_latency, traffic_profile)
 
         observation = self._get_observation(traffic_profile=traffic_profile, uptime=uptime_ratio, p95_latency=p95_latency)
+        budget_total = max(1e-6, self.task.cost_budget * max(1, self.task.max_steps))
+        budget_ratio = self.cumulative_cost / budget_total
+        budget_exhausted = budget_ratio > 1.35
+        if budget_exhausted:
+            self.ended_by_budget_failure = True
+
         reward = self.reward_calculator.calculate(
             obs=observation,
             action=clean_action,
             resolved_incidents=self.resolved_incidents,
             unresolved_critical=unresolved_critical,
             total_incidents=self.total_incidents,
-            cost_ratio=self.cumulative_cost / max(1e-6, self.task.cost_budget * max(1, self.task.max_steps)),
+            cost_ratio=budget_ratio,
             uptime_ratio=uptime_ratio,
+            unforced_page=unforced_page,
+            action_streak=self.action_streak,
         )
 
         self.last_reward = reward
         self.last_action_result = action_result
         self.timestep += 1
-        self.done = self.timestep >= self.task.max_steps or self.sla_breaches >= 10 or uptime_ratio < 0.25
+        self.done = (
+            self.timestep >= self.task.max_steps
+            or self.sla_breaches >= self.task.max_sla_breaches
+            or uptime_ratio < 0.25
+            or budget_exhausted
+        )
 
         info = {
             "error": None,
@@ -152,6 +221,9 @@ class IncidentCommanderEnv:
             "service_loads": service_loads,
             "resolved_incidents": self.resolved_incidents,
             "total_incidents": self.total_incidents,
+            "budget_ratio": round(budget_ratio, 6),
+            "budget_exhausted": budget_exhausted,
+            "unforced_pages": self.unforced_pages,
         }
         return observation, reward, self.done, info
 
@@ -252,6 +324,18 @@ class IncidentCommanderEnv:
                 return self.task.peak_traffic
             self.phase = "containment"
             return self.task.base_traffic * 0.9
+        if self.task.task_id == "blackout":
+            if self.timestep < 12:
+                self.phase = "brownout"
+                return self.task.base_traffic * 1.15
+            if self.timestep < 36:
+                self.phase = "regional-outage"
+                return self.task.peak_traffic
+            if self.timestep < 56:
+                self.phase = "rollback-window"
+                return self.task.base_traffic * 1.45
+            self.phase = "stabilization"
+            return self.task.base_traffic * 1.05
         self.phase = "longhaul"
         if self.timestep < 15:
             return self.task.base_traffic * 0.95
@@ -373,9 +457,10 @@ class IncidentCommanderEnv:
                 incident.resolved = True
                 self.resolved_incidents += 1
 
-        if self.timestep >= 2 and self.task.task_id in {"hard", "longhaul"}:
+        if self.timestep >= 2 and self.task.task_id in {"hard", "longhaul", "blackout"}:
             unresolved = [i for i in self.active_incidents if not i.resolved]
-            if len(unresolved) >= 2:
+            required_unresolved = 2 if self.task.task_id != "blackout" else 3
+            if len(unresolved) >= required_unresolved:
                 self.active_incidents.append(
                     ActiveIncident(
                         incident_id=f"cascade-{self.task.task_id}-{self.timestep}",
@@ -444,6 +529,9 @@ class IncidentCommanderEnv:
         sla_score = max(0.0, min(1.0, 1.0 - self.sla_breaches / max(1, self.task.max_steps // 3)))
         cost_score = max(0.0, min(1.0, 1.0 - self.cumulative_cost / max(1e-6, self.task.cost_budget * self.task.max_steps)))
         recovery_score = max(0.0, min(1.0, self.resolved_incidents / max(1, self.total_incidents)))
+        action_total = max(1, self.timestep)
+        passive_ratio = (self.action_counts["noop"] + self.unforced_pages) / action_total
+        action_discipline_score = max(0.0, min(1.0, 1.0 - passive_ratio))
         return {
             "uptime_score": round(uptime_score, 6),
             "avg_latency": round(avg_latency, 6),
@@ -451,6 +539,7 @@ class IncidentCommanderEnv:
             "sla_score": round(sla_score, 6),
             "cost_score": round(cost_score, 6),
             "recovery_score": round(recovery_score, 6),
+            "action_discipline_score": round(action_discipline_score, 6),
         }
 
     def build_episode_result(self) -> EpisodeResult:
@@ -470,6 +559,9 @@ class IncidentCommanderEnv:
             cost_score=metrics["cost_score"],
             recovery_score=metrics["recovery_score"],
             incident_clearance_rate=metrics["recovery_score"],
-            ended_by_sla_failure=self.sla_breaches >= 10,
+            ended_by_sla_failure=self.sla_breaches >= self.task.max_sla_breaches,
+            ended_by_budget_failure=self.ended_by_budget_failure,
+            action_discipline_score=metrics["action_discipline_score"],
+            escalations_used=self.action_counts["page_human"],
             total_score=round(max(0.0, min(1.0, total)), 6),
         )

@@ -16,6 +16,8 @@ class RewardCalculator:
         total_incidents: int,
         cost_ratio: float,
         uptime_ratio: float,
+        unforced_page: bool,
+        action_streak: int,
     ) -> IncidentCommanderReward:
         uptime = max(0.0, min(1.0, uptime_ratio))
         latency = max(0.0, min(1.0, 1.0 - obs.p95_latency / 700.0))
@@ -30,6 +32,10 @@ class RewardCalculator:
             total -= 0.08
         if obs.sla_breaches > 0:
             total -= min(0.12, 0.02 * obs.sla_breaches)
+        if unforced_page:
+            total -= 0.08
+        if action_streak >= 5 and action.action_type in {"noop", "page_human"}:
+            total -= 0.06
 
         total = max(0.0, min(1.0, total))
         return IncidentCommanderReward(

@@ -18,8 +18,17 @@ dependencies = [
   "openenv-core>=0.2.0"
 ]
 
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0.0"
+]
+
 [project.scripts]
 server = "server.app:main"
 
 [tool.setuptools]
 packages = ["app", "server"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
