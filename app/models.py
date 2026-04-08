@@ -26,6 +26,7 @@ class ServiceState(BaseModel):
     observed_error_rate: Optional[float] = None
     metric_staleness_steps: int = 0
     last_action_result: str = "idle"
+    reachable_upstreams: List[str] = []
 
 
 class ActiveIncident(BaseModel):
@@ -45,6 +46,15 @@ class ActiveIncident(BaseModel):
     resolution_timer: int = 0
 
 
+class ScenarioState(BaseModel):
+    scenario_id: Literal["resource_exhaustion", "config_drift", "heisenbug"]
+    noisy_neighbor_io: float = 0.0
+    db_port_expected: int = 5432
+    db_port_actual: int = 5432
+    heisenbug_armed: bool = False
+    heisenbug_triggered: bool = False
+
+
 class IncidentCommanderObservation(BaseModel):
     services: Dict[str, ServiceState]
     active_incidents: List[ActiveIncident]
@@ -57,10 +67,28 @@ class IncidentCommanderObservation(BaseModel):
     cost_per_step: float
     last_action_result: str
     phase: str
+    symptoms: List[str] = []
+    terminal_output: List[str] = []
+    investigation_log: List[str] = []
+    live_timeline: List[str] = []
+    available_actions: List[str] = []
+    scenario_hint: Optional[str] = None
 
 
 class IncidentCommanderAction(BaseModel):
     action_type: Literal[
+        "get_metrics",
+        "list_processes",
+        "read_last_n_logs",
+        "check_network_connectivity",
+        "restart_service",
+        "rollback_deployment",
+        "scale_up_replicas",
+        "edit_config_line",
+        "run_healthcheck",
+        "ask_developer",
+        "load_test",
+        "run_command",
         "scale_service",
         "reroute_traffic",
         "rollback_deploy",
@@ -73,6 +101,11 @@ class IncidentCommanderAction(BaseModel):
     request_fraction: float = 0.0
     target_version: Optional[str] = None
     fallback_service: Optional[str] = None
+    n_lines: int = 20
+    config_key: Optional[str] = None
+    config_value: Optional[str] = None
+    question: Optional[str] = None
+    command: Optional[str] = None
     note: Optional[str] = None
 
 
@@ -86,6 +119,10 @@ class IncidentCommanderReward(BaseModel):
     mttr_bonus: float = 0.0
     burn_budget_penalty: float = 0.0
     anti_panic_penalty: float = 0.0
+    latency_penalty: float = 0.0
+    resource_waste_penalty: float = 0.0
+    incorrect_action_penalty: float = 0.0
+    safety_penalty: float = 0.0
 
 
 class TaskConfig(BaseModel):
@@ -101,6 +138,7 @@ class TaskConfig(BaseModel):
     spot_disruption_chance: float = 0.0
     memory_leak_rate: float = 0.0
     thundering_herd: bool = False
+    scenario_mix: List[Literal["resource_exhaustion", "config_drift", "heisenbug"]] = ["resource_exhaustion"]
 
 
 class EpisodeResult(BaseModel):
@@ -117,4 +155,10 @@ class EpisodeResult(BaseModel):
     escalations_used: int = 0
     sla_breaches: int = 0
     burn_budget_ratio: float = 0.0
+    root_cause_identification_rate: float = 0.0
+    safe_ops_score: float = 1.0
+    verification_score: float = 0.0
+    db_recovered: bool = False
+    auth_recovered: bool = False
+    frontend_recovered: bool = False
     total_score: float

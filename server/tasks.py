@@ -25,13 +25,22 @@ def _discipline_term(result: EpisodeResult, low_escalation: int, high_escalation
     return discipline
 
 
+def _ground_truth_recovery(result: EpisodeResult) -> float:
+    recovered = sum([result.db_recovered, result.auth_recovered, result.frontend_recovered])
+    return recovered / 3.0
+
+
 def grade_easy(result: EpisodeResult) -> float:
+    recovery_truth = _ground_truth_recovery(result)
     score = (
-        0.44 * result.uptime_score
-        + 0.24 * result.latency_score
-        + 0.15 * result.sla_score
-        + 0.14 * result.recovery_score
-        + 0.03 * result.cost_score
+        0.36 * result.uptime_score
+        + 0.18 * result.latency_score
+        + 0.16 * result.sla_score
+        + 0.12 * result.recovery_score
+        + 0.06 * result.cost_score
+        + 0.07 * recovery_truth
+        + 0.03 * result.verification_score
+        + 0.02 * result.safe_ops_score
     )
     score += _discipline_term(result, low_escalation=1, high_escalation=3)
     score -= _failure_penalty(result)
@@ -39,12 +48,16 @@ def grade_easy(result: EpisodeResult) -> float:
 
 
 def grade_medium(result: EpisodeResult) -> float:
+    recovery_truth = _ground_truth_recovery(result)
     score = (
-        0.38 * result.uptime_score
-        + 0.20 * result.latency_score
-        + 0.20 * result.sla_score
+        0.32 * result.uptime_score
+        + 0.18 * result.latency_score
+        + 0.19 * result.sla_score
         + 0.11 * result.cost_score
-        + 0.11 * result.recovery_score
+        + 0.10 * result.recovery_score
+        + 0.05 * result.root_cause_identification_rate
+        + 0.03 * result.verification_score
+        + 0.02 * recovery_truth
     )
     score += _discipline_term(result, low_escalation=2, high_escalation=4)
     score -= _failure_penalty(result)
@@ -52,12 +65,16 @@ def grade_medium(result: EpisodeResult) -> float:
 
 
 def grade_hard(result: EpisodeResult) -> float:
+    recovery_truth = _ground_truth_recovery(result)
     score = (
-        0.30 * result.uptime_score
-        + 0.18 * result.latency_score
+        0.26 * result.uptime_score
+        + 0.16 * result.latency_score
         + 0.22 * result.sla_score
-        + 0.14 * result.cost_score
+        + 0.12 * result.cost_score
         + 0.08 * result.recovery_score
+        + 0.07 * result.root_cause_identification_rate
+        + 0.04 * result.verification_score
+        + 0.05 * recovery_truth
     )
     score += _discipline_term(result, low_escalation=2, high_escalation=5)
     score -= min(0.22, 0.035 * result.sla_breaches)
@@ -67,12 +84,16 @@ def grade_hard(result: EpisodeResult) -> float:
 
 
 def grade_longhaul(result: EpisodeResult) -> float:
+    recovery_truth = _ground_truth_recovery(result)
     score = (
-        0.24 * result.uptime_score
-        + 0.17 * result.latency_score
-        + 0.24 * result.sla_score
+        0.22 * result.uptime_score
+        + 0.15 * result.latency_score
+        + 0.23 * result.sla_score
         + 0.18 * result.cost_score
-        + 0.17 * result.recovery_score
+        + 0.14 * result.recovery_score
+        + 0.05 * result.root_cause_identification_rate
+        + 0.03 * result.verification_score
+        + 0.04 * recovery_truth
     )
     score += _discipline_term(result, low_escalation=3, high_escalation=6)
     score -= min(0.28, 0.04 * result.sla_breaches)
@@ -83,12 +104,16 @@ def grade_longhaul(result: EpisodeResult) -> float:
 
 def grade_blackout(result: EpisodeResult) -> float:
     # Blackout prioritizes SLA survival and sustained containment under prolonged pressure.
+    recovery_truth = _ground_truth_recovery(result)
     score = (
-        0.22 * result.uptime_score
-        + 0.17 * result.latency_score
-        + 0.27 * result.sla_score
+        0.20 * result.uptime_score
+        + 0.15 * result.latency_score
+        + 0.25 * result.sla_score
         + 0.18 * result.cost_score
-        + 0.16 * result.recovery_score
+        + 0.12 * result.recovery_score
+        + 0.05 * result.root_cause_identification_rate
+        + 0.03 * result.verification_score
+        + 0.02 * recovery_truth
     )
     score += _discipline_term(result, low_escalation=3, high_escalation=7)
     score -= min(0.32, 0.045 * result.sla_breaches)

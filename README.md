@@ -40,7 +40,9 @@ The agent does not optimize a toy score. It makes constrained, sequential decisi
 - stop cascading failures before they spread,
 - balance recovery actions against cost and human attention.
 
-This environment is explicitly **systemic rather than atomic**: failures are coupled across services (for example, database latency can trigger gateway CPU saturation), so the agent must reason over interactions instead of isolated thresholds.
+This environment is explicitly **systemic rather than atomic**: failures are coupled across services (for example, `db` failures first poison `auth`, then surface as `frontend` 404/500 symptoms), so the agent must reason over interactions instead of isolated thresholds.
+
+Existing coding-heavy environments mostly evaluate code synthesis. **Incident Commander instead evaluates real systems reasoning under outage pressure**: investigate, hypothesize, remediate, and verify.
 
 The policy challenge is also **cognitive load under uncertainty**: observations can be noisy or stale, spot capacity can disappear, and priorities shift over time. High scores require robust decision-making, not brittle if-else reactions.
 
@@ -68,30 +70,31 @@ A purely reactive prompt policy can look competent on simple episodes but fails 
 
 ## What changed in this version
 
-- Added cascading dependency dynamics (`database` latency can amplify `gateway` pressure).
-- Added noisy/stale observations (`observed_p95_latency`, `metric_staleness_steps`) to force uncertainty-aware control.
-- Added spot-instance economics and interruption risk in advanced tasks.
-- Added `longhaul` silent-leak behavior and `blackout` thundering-herd behavior.
-- Added per-step reward trace in `/metrics` for full auditability.
+- Added a stateful service graph with three interdependent services: `frontend -> auth -> db`.
+- Added a scenario factory (`resource_exhaustion`, `config_drift`, `heisenbug`) instead of static scripted failures.
+- Added black-box observability: root cause is hidden until the agent investigates logs, metrics, and network paths.
+- Added a professional SRE toolbelt action space (exploration, remediation, verification, human collaboration).
+- Added an ephemeral filesystem model where `/tmp` and runtime config are reset every episode.
+- Added live incident timeline output in `/metrics` for step-by-step auditability.
 
 ---
 
 ## Environment overview
 
-The environment simulates a small AI serving stack with three core services:
+The environment simulates a microservice cluster with three core services:
 
-- `gateway`: request intake and routing
-- `inference`: model-serving workload and latency pressure
-- `database`: stateful coordination and incident propagation
+- `frontend`: customer-facing API and web edge
+- `auth`: identity and token service
+- `db`: stateful dependency for auth/session data
 
-The agent receives a full snapshot of service health, incident state, traffic pressure, uptime, SLA breaches, cost, and the current phase of the episode. Each action changes the system state and affects the next few steps, so the task is fundamentally sequential rather than one-shot.
+The agent receives a terminal-like snapshot with noisy telemetry and user-visible symptoms. It is not told the root cause directly, and must inspect logs, metrics, and connectivity to trace failures.
 
 ### Core loop
 
 1. The agent observes the current incident state.
-2. It chooses an action such as scaling, rollback, rerouting, quarantine, paging, or noop.
+2. It chooses an exploratory, remediation, verification, or communication action.
 3. The environment updates service health, traffic pressure, and incidents.
-4. Reward is computed from uptime, latency, SLA protection, cost, and recovery.
+4. Reward is computed from success minus latency/resource/incorrect/safety penalties.
 5. The episode ends at the step budget, SLA failure threshold, or outage collapse.
 
 ---
@@ -132,7 +135,7 @@ Each step the agent receives a complete platform snapshot:
 | Field | Type | Description |
 |---|---|---|
 | services | Dict[str, ServiceState] | Health, instance count, latency, error rate, and quarantine state per service |
-| active_incidents | List[ActiveIncident] | Open incidents with type, severity, age, and resolution state |
+| active_incidents | List[ActiveIncident] | Masked incident cards; deeper root cause is hidden until investigation |
 | step | int | Current control cycle |
 | step_budget | int | Maximum episode length |
 | traffic_level | float | Aggregate demand pressure for the step |
@@ -142,8 +145,13 @@ Each step the agent receives a complete platform snapshot:
 | cost_per_step | float | Accumulated operating cost |
 | last_action_result | str | Human-readable result of the last action |
 | phase | str | Episode phase marker used for long-horizon dynamics |
+| symptoms | List[str] | What customers/on-call dashboards are currently reporting |
+| terminal_output | List[str] | Recent outputs from exploratory actions |
+| investigation_log | List[str] | Rolling log of metrics/log/network checks |
+| live_timeline | List[str] | Time-stamped incident timeline for auditability |
+| available_actions | List[str] | Explicit toolbelt available to the policy |
 
-`ServiceState` additionally includes CPU, memory, spot-instance count, and noisy observed metrics (`observed_p95_latency`, `observed_error_rate`, `metric_staleness_steps`) so agents can reason about telemetry quality.
+`ServiceState` includes CPU, memory, queue depth, and noisy observed metrics (`observed_p95_latency`, `observed_error_rate`, `metric_staleness_steps`) so agents can reason under uncertainty.
 
 ## Action space
 
@@ -151,23 +159,33 @@ The agent can take one of the following actions:
 
 | Action | Description |
 |---|---|
-| `scale_service` | Add or remove instances on a service |
-| `reroute_traffic` | Shift request load to a fallback service |
-| `rollback_deploy` | Revert a bad deploy to a known-safe version |
-| `quarantine_service` | Isolate a failing service |
-| `page_human` | Trigger emergency human intervention |
+| `get_metrics` | Inspect telemetry for a service |
+| `list_processes` | Inspect service process/worker state |
+| `read_last_n_logs` | Inspect service logs to trace failures |
+| `check_network_connectivity` | Probe service-to-service network paths |
+| `restart_service` | Restart a service instance pool |
+| `rollback_deployment` | Roll back a service to a safe release |
+| `scale_up_replicas` | Add replicas to recover capacity |
+| `edit_config_line` | Patch runtime config key/value |
+| `run_healthcheck` | Verify remediation succeeded |
+| `ask_developer` | Query a human/developer hint channel |
+| `load_test` | Intentionally stress the system for repro |
+| `run_command` | Execute an operational command (safety-penalized when reckless) |
 | `noop` | Leave the system unchanged for the step |
 
 ### Action schema
 
 ```python
 class IncidentCommanderAction(BaseModel):
-    action_type: Literal["scale_service", "reroute_traffic", "rollback_deploy", "quarantine_service", "page_human", "noop"]
+  action_type: Literal["get_metrics", "list_processes", "read_last_n_logs", "check_network_connectivity", "restart_service", "rollback_deployment", "scale_up_replicas", "edit_config_line", "run_healthcheck", "ask_developer", "load_test", "run_command", "noop"]
     target_service: Optional[str] = None
     delta_instances: int = 0
-    request_fraction: float = 0.0
-    target_version: Optional[str] = None
     fallback_service: Optional[str] = None
+  n_lines: int = 20
+  config_key: Optional[str] = None
+  config_value: Optional[str] = None
+  question: Optional[str] = None
+  command: Optional[str] = None
     note: Optional[str] = None
 ```
 
@@ -187,6 +205,13 @@ Per-step reward is decomposed and inspectable:
 | MTTR bonus | Fast recovery bonus for incidents resolved in <=3 steps | Reward decisive, early mitigation |
 | Burn-budget penalty | 99.9% SLA budget exhaustion penalty (heavier after budget is consumed) | Avoid repeated downtime bursts |
 | Anti-panic penalty | Penalizes contradictory actions (for example scale up then immediate scale down) | Prefer stable engineering decisions |
+| Safety penalty | Massive penalty for destructive action without prior investigation | Enforce safe SRE workflow |
+
+Reward objective:
+
+$$
+R = Success - \text{Latency\_Penalty} - \text{Resource\_Waste} - \text{Incorrect\_Actions} - \text{Safety\_Penalty}
+$$
 
 The environment keeps a per-step reward trace and exposes it through `/metrics` for judge auditability.
 

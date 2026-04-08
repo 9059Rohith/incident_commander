@@ -14,11 +14,11 @@ app = FastAPI(title="Incident Commander OpenEnv", version="1.0.0")
 
 envs: Dict[str, IncidentCommanderEnv] = {}
 TASK_DESCRIPTIONS = {
-    "easy": "Recover a single degraded API service under rising latency",
-    "medium": "Handle a bad deploy and traffic surge with rollback and scaling",
-    "hard": "Stop a cascading failure across API, inference, and database services",
-    "longhaul": "Silent-killer memory leak: keep healthy services from crashing under creeping memory pressure",
-    "blackout": "Thundering-herd outage: scale fast enough to prevent DB lockup without blowing budget",
+    "easy": "Trace frontend failures to root cause and restore service health",
+    "medium": "Investigate dependency failures across frontend/auth/db under pressure",
+    "hard": "Recover from config drift and high-load race conditions with verification",
+    "longhaul": "Handle mixed outages with black-box telemetry and budget-aware remediation",
+    "blackout": "Survive thundering-herd outages with safe, efficient SRE operations",
 }
 
 
@@ -29,23 +29,21 @@ def _get_env(task_id: str) -> IncidentCommanderEnv:
 
 
 def _baseline_action(observation: dict) -> IncidentCommanderAction:
-    incidents = [incident for incident in observation.get("active_incidents", []) if not incident.get("resolved", False)]
-    critical = [incident for incident in incidents if incident.get("severity") == "critical"]
-    if critical:
-        service = critical[0].get("service")
-        if service:
-            return IncidentCommanderAction(action_type="quarantine_service", target_service=service, note="baseline critical containment")
+    services = observation.get("services", {})
+    frontend = services.get("frontend", {})
 
-    for incident in incidents:
-        service = incident.get("service")
-        incident_type = incident.get("incident_type")
-        if incident_type == "bad_deploy" and service:
-            return IncidentCommanderAction(action_type="rollback_deploy", target_service=service, target_version="v0", note="baseline rollback")
-        if incident_type in {"node_failure", "cache_thrash"} and service:
-            return IncidentCommanderAction(action_type="scale_service", target_service=service, delta_instances=2, note="baseline scale")
+    if float(frontend.get("observed_error_rate", frontend.get("error_rate", 0.0)) or 0.0) > 0.35:
+        return IncidentCommanderAction(action_type="read_last_n_logs", target_service="auth", n_lines=30, note="baseline triage auth logs")
 
-    if float(observation.get("p95_latency", 0.0) or 0.0) > 260:
-        return IncidentCommanderAction(action_type="scale_service", target_service="inference", delta_instances=1, note="baseline latency scale")
+    if float(observation.get("p95_latency", 0.0) or 0.0) > 280:
+        return IncidentCommanderAction(action_type="scale_up_replicas", target_service="frontend", delta_instances=1, note="baseline scale")
+
+    if float(observation.get("traffic_level", 0.0) or 0.0) > 1.6:
+        return IncidentCommanderAction(action_type="load_test", note="baseline repro load")
+
+    if int(observation.get("step", 0) or 0) % 4 == 0:
+        return IncidentCommanderAction(action_type="run_healthcheck", target_service="frontend", note="baseline verify")
+
     return IncidentCommanderAction(action_type="noop", note="baseline noop")
 
 
@@ -149,12 +147,12 @@ async def visualize(task_id: str = "easy"):
     env = _get_env(task_id)
     header = "[SERVICES]  STAT | CPU | MEM | LATENCY | COST | NOTES"
     lines = [header]
-    for name in ("gateway", "inference", "database"):
+    for name in ("frontend", "auth", "db"):
         service = env.services[name]
         status = "UP" if service.healthy else "DEG"
         cost_tag = "$" * max(1, service.instances - service.spot_instances) + ("s" * service.spot_instances)
         note = service.last_action_result
-        if name == "database" and service.p95_latency > 250:
+        if name == "db" and service.p95_latency > 250:
             note = "ROOT CAUSE? " + note
 
         lines.append(

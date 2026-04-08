@@ -15,50 +15,27 @@ def noop_policy(_: IncidentCommanderObservation) -> IncidentCommanderAction:
 
 
 def greedy_policy(obs: IncidentCommanderObservation) -> IncidentCommanderAction:
-    incidents = [incident for incident in obs.active_incidents if not incident.resolved]
-    critical = [incident for incident in incidents if incident.severity == "critical"]
-    if critical:
-        return IncidentCommanderAction(
-            action_type="quarantine_service",
-            target_service=critical[0].service,
-            note="critical containment",
-        )
+    frontend = obs.services.get("frontend")
+    auth = obs.services.get("auth")
+    db = obs.services.get("db")
 
-    for incident in incidents:
-        if incident.incident_type == "bad_deploy":
-            return IncidentCommanderAction(
-                action_type="rollback_deploy",
-                target_service=incident.service,
-                target_version="v0",
-                note="rollback bad deploy",
-            )
-        if incident.incident_type in {"node_failure", "cache_thrash"}:
-            return IncidentCommanderAction(
-                action_type="scale_service",
-                target_service=incident.service,
-                delta_instances=2,
-                note="capacity recovery",
-            )
+    if frontend and frontend.error_rate > 0.35:
+        return IncidentCommanderAction(action_type="read_last_n_logs", target_service="auth", n_lines=25, note="triage auth logs")
 
-    if obs.p95_latency > 260 or obs.traffic_level > 1.6:
-        return IncidentCommanderAction(
-            action_type="scale_service",
-            target_service="inference",
-            delta_instances=1,
-            note="latency guardrail",
-        )
+    if auth and auth.error_rate > 0.30:
+        return IncidentCommanderAction(action_type="check_network_connectivity", target_service="auth", fallback_service="db", note="network check")
 
-    if obs.phase in {"regional-outage", "surge"} and len(incidents) >= 2:
-        return IncidentCommanderAction(action_type="page_human", note="phase escalation")
+    if db and db.error_rate > 0.25:
+        return IncidentCommanderAction(action_type="scale_up_replicas", target_service="db", delta_instances=1, note="db headroom")
 
-    if obs.p95_latency > 220:
-        return IncidentCommanderAction(
-            action_type="reroute_traffic",
-            target_service="gateway",
-            fallback_service="inference",
-            request_fraction=0.25,
-            note="reroute pressure",
-        )
+    if obs.p95_latency > 280:
+        return IncidentCommanderAction(action_type="scale_up_replicas", target_service="frontend", delta_instances=1, note="frontend scale")
+
+    if obs.phase in {"surge", "thundering-herd"} and obs.traffic_level > 1.5:
+        return IncidentCommanderAction(action_type="load_test", note="repro under pressure")
+
+    if obs.step % 5 == 0:
+        return IncidentCommanderAction(action_type="run_healthcheck", target_service="frontend", note="verify")
 
     return IncidentCommanderAction(action_type="noop", note="stable")
 
@@ -71,34 +48,32 @@ class ReasoningPolicy:
         traffic_roc = float(obs.traffic_level - self.last_traffic)
         self.last_traffic = float(obs.traffic_level)
 
-        inference = obs.services.get("inference")
-        database = obs.services.get("database")
+        auth = obs.services.get("auth")
+        db = obs.services.get("db")
 
-        if inference and obs.phase == "silent-leak" and inference.memory_utilization > 76:
+        if obs.step < 2:
+            return IncidentCommanderAction(action_type="get_metrics", target_service="frontend", note="initial triage")
+
+        if obs.step == 2:
+            return IncidentCommanderAction(action_type="read_last_n_logs", target_service="auth", n_lines=40, note="trace root cause")
+
+        if auth and auth.error_rate > 0.40:
+            return IncidentCommanderAction(action_type="edit_config_line", config_key="db_port", config_value="5432", note="fix config drift")
+
+        if db and db.error_rate > 0.25:
             return IncidentCommanderAction(
-                action_type="scale_service",
-                target_service="inference",
+                action_type="scale_up_replicas",
+                target_service="db",
                 delta_instances=1,
-                note="silent leak headroom",
+                note="db stability",
             )
 
-        if obs.phase == "thundering-herd" and traffic_roc > 0.1:
-            if database and database.instances < 4:
-                return IncidentCommanderAction(
-                    action_type="scale_service",
-                    target_service="database",
-                    delta_instances=1,
-                    note="protect db under herd pressure",
-                )
-            if inference and inference.instances < 7:
-                return IncidentCommanderAction(
-                    action_type="scale_service",
-                    target_service="inference",
-                    delta_instances=1,
-                    note="predictive scale for herd",
-                )
+        if obs.phase in {"surge", "thundering-herd"} and traffic_roc > 0.1:
+            return IncidentCommanderAction(action_type="rollback_deployment", target_service="auth", note="mitigate heisenbug")
 
-        # Fall back to the strong reactive baseline for everything else.
+        if obs.step % 4 == 0:
+            return IncidentCommanderAction(action_type="run_healthcheck", note="cluster verify")
+
         return greedy_policy(obs)
 
 

@@ -30,9 +30,10 @@ MAX_STEPS = {"easy": 30, "medium": 40, "hard": 50, "longhaul": 60, "blackout": 7
 BENCHMARK = "incident-commander"
 
 SYSTEM_PROMPT = (
-    "You are an incident commander for an AI platform. "
-    "Return only strict JSON with keys action_type, target_service, delta_instances, request_fraction, target_version, fallback_service, note. "
-    "Valid action_type values are noop, scale_service, reroute_traffic, rollback_deploy, quarantine_service, page_human."
+    "You are an incident commander for a microservices outage. "
+    "Return only strict JSON with keys action_type, target_service, delta_instances, fallback_service, config_key, config_value, n_lines, question, note. "
+    "Valid action_type values are get_metrics, list_processes, read_last_n_logs, check_network_connectivity, restart_service, rollback_deployment, "
+    "scale_up_replicas, edit_config_line, run_healthcheck, ask_developer, load_test, run_command, noop."
 )
 
 client = OpenAI(api_key=API_KEY or "", base_url=API_BASE_URL)
@@ -71,112 +72,53 @@ def _safe_action() -> Dict[str, Any]:
 
 
 def _heuristic_action(obs: Dict[str, Any]) -> Dict[str, Any]:
-    services = obs.get("services", {})
-    incidents = [incident for incident in obs.get("active_incidents", []) if not incident.get("resolved", False)]
+    symptoms = obs.get("symptoms", [])
+    terminal_output = obs.get("terminal_output", [])
     traffic = float(obs.get("traffic_level", 0.0) or 0.0)
     latency = float(obs.get("p95_latency", 0.0) or 0.0)
-    phase = str(obs.get("phase", "steady") or "steady")
 
-    def service_has_incident(service_name: str, incident_type: str) -> bool:
-        return any(
-            incident.get("service") == service_name and incident.get("incident_type") == incident_type
-            for incident in incidents
-        )
-
-    critical_open = [incident for incident in incidents if incident.get("severity") == "critical"]
-    if critical_open:
-        target = str(critical_open[0].get("service", ""))
-        if target:
-            if service_has_incident(target, "bad_deploy"):
-                return {
-                    "action_type": "rollback_deploy",
-                    "target_service": target,
-                    "delta_instances": 0,
-                    "request_fraction": 0.0,
-                    "target_version": "v0",
-                    "fallback_service": None,
-                    "note": "critical deploy rollback",
-                }
-            if service_has_incident(target, "cascade"):
-                return {
-                    "action_type": "quarantine_service",
-                    "target_service": target,
-                    "delta_instances": 0,
-                    "request_fraction": 0.0,
-                    "target_version": None,
-                    "fallback_service": None,
-                    "note": "contain cascade",
-                }
-
-    for incident in incidents:
-        incident_type = incident.get("incident_type")
-        service_name = str(incident.get("service", ""))
-        if not service_name:
-            continue
-        if incident_type == "bad_deploy":
-            return {
-                "action_type": "rollback_deploy",
-                "target_service": service_name,
-                "delta_instances": 0,
-                "request_fraction": 0.0,
-                "target_version": "v0",
-                "fallback_service": None,
-                "note": "rollback bad deploy",
-            }
-        if incident_type in {"node_failure", "cache_thrash"}:
-            return {
-                "action_type": "scale_service",
-                "target_service": service_name,
-                "delta_instances": 2,
-                "request_fraction": 0.0,
-                "target_version": None,
-                "fallback_service": None,
-                "note": "add capacity for recovery",
-            }
-
-    if latency > 260 or traffic > 1.55:
+    if latency > 320:
         return {
-            "action_type": "scale_service",
-            "target_service": "inference",
+            "action_type": "scale_up_replicas",
+            "target_service": "frontend",
             "delta_instances": 1,
-            "request_fraction": 0.0,
-            "target_version": None,
-            "fallback_service": None,
             "note": "latency-pressure autoscale",
         }
 
-    if phase in {"regional-outage", "surge"} and len(incidents) >= 2:
+    symptom_blob = " ".join(str(s) for s in symptoms).lower()
+    terminal_blob = " ".join(str(s) for s in terminal_output).lower()
+
+    if "frontend" in symptom_blob and "auth" not in terminal_blob:
         return {
-            "action_type": "page_human",
-            "target_service": None,
-            "delta_instances": 0,
-            "request_fraction": 0.0,
-            "target_version": None,
-            "fallback_service": None,
-            "note": "phase-aware escalation",
+            "action_type": "read_last_n_logs",
+            "target_service": "auth",
+            "n_lines": 30,
+            "note": "trace from frontend to auth",
         }
 
-    if latency > 220 and "gateway" in services and "inference" in services:
+    if "connection refused" in terminal_blob or "wrong port" in terminal_blob:
         return {
-            "action_type": "reroute_traffic",
-            "target_service": "gateway",
-            "delta_instances": 0,
-            "request_fraction": 0.25,
-            "target_version": None,
-            "fallback_service": "inference",
-            "note": "partial reroute",
+            "action_type": "edit_config_line",
+            "config_key": "db_port",
+            "config_value": "5432",
+            "note": "repair config drift",
         }
 
-    if len(critical_open) > 0:
+    if "race condition" in terminal_blob and traffic > 1.3:
         return {
-            "action_type": "page_human",
-            "target_service": None,
-            "delta_instances": 0,
-            "request_fraction": 0.0,
-            "target_version": None,
-            "fallback_service": None,
-            "note": "critical escalation",
+            "action_type": "rollback_deployment",
+            "target_service": "auth",
+            "note": "rollback buggy auth release",
         }
+
+    if traffic > 1.6:
+        return {"action_type": "load_test", "note": "repro under load"}
+
+    if obs.get("step", 0) in {0, 1}:
+        return {"action_type": "get_metrics", "target_service": "frontend", "note": "start investigation"}
+
+    if obs.get("step", 0) % 4 == 0:
+        return {"action_type": "run_healthcheck", "note": "verify fix"}
 
     return _safe_action()
 
@@ -192,7 +134,8 @@ def _llm_action(obs: Dict[str, Any]) -> Dict[str, Any]:
             "uptime": obs.get("uptime", 0.0),
             "sla_breaches": obs.get("sla_breaches", 0),
             "services": obs.get("services", {}),
-            "incidents": obs.get("active_incidents", []),
+            "symptoms": obs.get("symptoms", []),
+            "terminal_output": obs.get("terminal_output", []),
         },
         separators=(",", ":"),
     )
@@ -215,9 +158,12 @@ def _llm_action(obs: Dict[str, Any]) -> Dict[str, Any]:
             "action_type": action.get("action_type", "noop"),
             "target_service": action.get("target_service"),
             "delta_instances": int(action.get("delta_instances", 0) or 0),
-            "request_fraction": float(action.get("request_fraction", 0.0) or 0.0),
-            "target_version": action.get("target_version"),
             "fallback_service": action.get("fallback_service"),
+            "n_lines": int(action.get("n_lines", 20) or 20),
+            "config_key": action.get("config_key"),
+            "config_value": action.get("config_value"),
+            "question": action.get("question"),
+            "command": action.get("command"),
             "note": action.get("note", ""),
         }
     except Exception:

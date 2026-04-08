@@ -44,11 +44,9 @@ def run() -> None:
         _assert(obs_a == obs_b, f"reset determinism failed for {task_id}")
 
         step_payload = {
-            "action_type": "scale_service",
-            "target_service": "inference",
+            "action_type": "scale_up_replicas",
+            "target_service": "frontend",
             "delta_instances": 1,
-            "request_fraction": 0.0,
-            "target_version": None,
             "fallback_service": None,
             "note": "test step",
         }

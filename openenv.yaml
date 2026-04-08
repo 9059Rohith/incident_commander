@@ -5,8 +5,8 @@ colorFrom: blue
 colorTo: gray
 sdk: docker
 description: >
-  Incident Commander OpenEnv where an LLM agent stabilizes a simulated AI
-  platform under deploy failures, traffic spikes, and cascading incidents.
+  Incident Commander OpenEnv where an LLM agent performs black-box SRE
+  investigation and recovery across a stateful frontend-auth-db cluster.
 author: Rohith Kumar
 tags:
   - openenv
@@ -20,17 +20,17 @@ tags:
 license: mit
 tasks:
   - name: easy
-    description: Recover a single degraded API service under rising latency
+    description: Trace frontend symptoms and recover a simple dependency outage
     difficulty: easy
   - name: medium
-    description: Handle a bad deploy and traffic surge with rollback and scaling
+    description: Investigate and recover coupled auth-db failures under load
     difficulty: medium
   - name: hard
-    description: Stop a cascading failure across API, inference, and database services
+    description: Resolve config drift and race-condition regressions with verification
     difficulty: hard
   - name: longhaul
-    description: Silent-killer memory leak task requiring proactive recovery before crash
+    description: Mixed outage long-horizon scenario with noisy telemetry and budget pressure
     difficulty: hard
   - name: blackout
-    description: Thundering-herd regional outage balancing fast scale-up and budget burn
+    description: Thundering-herd outage requiring safe and efficient root-cause remediation
     difficulty: hard

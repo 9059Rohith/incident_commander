@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 import numpy as np
 
@@ -11,6 +11,7 @@ from .models import (
     IncidentCommanderAction,
     IncidentCommanderObservation,
     IncidentCommanderReward,
+    ScenarioState,
     ServiceState,
     TaskConfig,
 )
@@ -22,71 +23,57 @@ TASKS: Dict[str, TaskConfig] = {
         task_id="easy",
         max_steps=30,
         base_traffic=1.0,
-        peak_traffic=1.45,
+        peak_traffic=1.4,
         incident_schedule=[0],
         cost_budget=0.55,
-        spike_multiplier=1.2,
         max_sla_breaches=10,
         observation_noise=0.02,
-        spot_disruption_chance=0.0,
-        memory_leak_rate=0.0,
-        thundering_herd=False,
+        scenario_mix=["resource_exhaustion"],
     ),
     "medium": TaskConfig(
         task_id="medium",
         max_steps=40,
         base_traffic=1.05,
         peak_traffic=1.8,
-        incident_schedule=[0, 7],
-        cost_budget=0.65,
-        spike_multiplier=1.45,
+        incident_schedule=[0, 8],
+        cost_budget=0.64,
         max_sla_breaches=9,
-        observation_noise=0.04,
-        spot_disruption_chance=0.01,
-        memory_leak_rate=0.0,
-        thundering_herd=False,
+        observation_noise=0.05,
+        scenario_mix=["resource_exhaustion", "config_drift"],
     ),
     "hard": TaskConfig(
         task_id="hard",
         max_steps=50,
         base_traffic=1.1,
         peak_traffic=2.1,
-        incident_schedule=[0, 4, 10],
+        incident_schedule=[0, 10, 20],
         cost_budget=0.72,
-        spike_multiplier=1.65,
         max_sla_breaches=8,
         observation_noise=0.08,
-        spot_disruption_chance=0.02,
-        memory_leak_rate=0.0,
-        thundering_herd=False,
+        scenario_mix=["config_drift", "heisenbug"],
     ),
     "longhaul": TaskConfig(
         task_id="longhaul",
         max_steps=60,
         base_traffic=1.0,
         peak_traffic=2.3,
-        incident_schedule=[0, 8, 18, 30, 42, 50],
-        cost_budget=0.78,
-        spike_multiplier=1.85,
+        incident_schedule=[0, 10, 22, 34, 48],
+        cost_budget=0.8,
         max_sla_breaches=8,
-        observation_noise=0.11,
-        spot_disruption_chance=0.03,
-        memory_leak_rate=0.05,
-        thundering_herd=False,
+        observation_noise=0.1,
+        scenario_mix=["resource_exhaustion", "config_drift", "heisenbug"],
     ),
     "blackout": TaskConfig(
         task_id="blackout",
         max_steps=70,
         base_traffic=1.15,
         peak_traffic=2.7,
-        incident_schedule=[0, 5, 11, 17, 26, 34, 41, 50, 60],
-        cost_budget=0.86,
-        spike_multiplier=2.1,
+        incident_schedule=[0, 6, 14, 24, 36, 50, 62],
+        cost_budget=0.88,
         max_sla_breaches=7,
         observation_noise=0.14,
-        spot_disruption_chance=0.05,
-        memory_leak_rate=0.0,
         thundering_herd=True,
+        scenario_mix=["resource_exhaustion", "config_drift", "heisenbug"],
     ),
 }
 
@@ -97,81 +84,110 @@ class IncidentCommanderEnv:
         self.seed = int(seed)
         self.rng = np.random.default_rng(self.seed)
         self.reward_calculator = RewardCalculator(task)
+
         self.services: Dict[str, ServiceState] = {}
         self.active_incidents: List[ActiveIncident] = []
+        self.scenario = ScenarioState(scenario_id="resource_exhaustion")
 
         self.timestep = 0
         self.done = False
         self.last_reward = IncidentCommanderReward(total=0.0, uptime=0.0, latency=0.0, sla=0.0, cost=0.0, recovery=0.0)
         self.last_action_result = "initialized"
+        self.phase = "steady"
+
         self.sla_breaches = 0
         self.total_incidents = 0
         self.resolved_incidents = 0
         self.cumulative_cost = 0.0
+        self.downtime_used = 0.0
+        self.burn_budget_total = max(0.05, self.task.max_steps * 0.002)
+
         self.uptime_history: List[float] = []
         self.latency_history: List[float] = []
-        self.phase = "steady"
-        self.human_attention_steps = 0
-        self.unforced_pages = 0
+        self.reward_trace: List[Dict[str, object]] = []
+        self.live_timeline: List[str] = []
+
+        self.investigation_log: List[str] = []
+        self.investigation_targets: Set[str] = set()
+        self.verification_successes = 0
+        self.incorrect_actions = 0
+        self.unsafe_actions = 0
+        self.root_cause_resolutions = 0
+
+        self.tmp_files: List[str] = []
+        self.config_default: Dict[str, str] = {
+            "db_host": "db",
+            "db_port": "5432",
+            "auth_mode": "strict",
+            "feature_flag_race_guard": "false",
+        }
+        self.config_broken: Dict[str, str] = dict(self.config_default)
+        self.config_runtime: Dict[str, str] = {}
+
+        self.dev_hint_cooldown = 0
+        self.load_test_active_steps = 0
+        self.open_sockets = 0
+
+        self.last_observed_metrics: Dict[str, Tuple[Optional[float], Optional[float]]] = {}
+
+        self.action_counts: Dict[str, int] = defaultdict(int)
         self.last_action_type = "noop"
         self.action_streak = 0
         self.ended_by_budget_failure = False
-        self.action_counts: Dict[str, int] = {}
-
-        self.reward_trace: List[Dict[str, object]] = []
-        self.downtime_used = 0.0
-        self.burn_budget_total = max(0.05, self.task.max_steps * 0.001)
-        self.previous_traffic = self.task.base_traffic
-        self.last_observed_metrics: Dict[str, Tuple[Optional[float], Optional[float]]] = {}
-
-        self.last_scale_target: Optional[str] = None
-        self.last_scale_direction = 0
 
         self._init_state()
 
     def _init_state(self) -> None:
         self.services = {
-            "gateway": ServiceState(name="gateway", instances=3, desired_instances=3, version="v1", rollback_version="v0"),
-            "inference": ServiceState(name="inference", instances=4, desired_instances=4, version="v1", rollback_version="v0"),
-            "database": ServiceState(name="database", instances=2, desired_instances=2, version="v1", rollback_version="v0"),
+            "frontend": ServiceState(name="frontend", instances=3, desired_instances=3, version="v1", rollback_version="v0"),
+            "auth": ServiceState(name="auth", instances=3, desired_instances=3, version="v1", rollback_version="v0"),
+            "db": ServiceState(name="db", instances=2, desired_instances=2, version="v1", rollback_version="v0"),
         }
-
-        if self.task.task_id in {"hard", "longhaul", "blackout"}:
-            self.services["gateway"].spot_instances = 1
-            self.services["inference"].spot_instances = 1
-            self.services["database"].spot_instances = 0
+        self.services["frontend"].reachable_upstreams = ["auth"]
+        self.services["auth"].reachable_upstreams = ["db"]
+        self.services["db"].reachable_upstreams = []
 
         self.active_incidents = []
         self.timestep = 0
         self.done = False
+        self.phase = "steady"
         self.last_action_result = "reset complete"
+
         self.sla_breaches = 0
         self.total_incidents = 0
         self.resolved_incidents = 0
         self.cumulative_cost = 0.0
+        self.downtime_used = 0.0
+
         self.uptime_history = []
         self.latency_history = []
-        self.phase = "steady"
-        self.human_attention_steps = 0
-        self.unforced_pages = 0
+        self.reward_trace = []
+        self.live_timeline = []
+
+        self.investigation_log = []
+        self.investigation_targets = set()
+        self.verification_successes = 0
+        self.incorrect_actions = 0
+        self.unsafe_actions = 0
+        self.root_cause_resolutions = 0
+
+        self.tmp_files = []
+        self.config_broken = dict(self.config_default)
+        self.config_runtime = dict(self.config_broken)
+
+        self.dev_hint_cooldown = 0
+        self.load_test_active_steps = 0
+        self.open_sockets = 0
+        self.last_observed_metrics = {}
+
+        self.action_counts = defaultdict(int)
         self.last_action_type = "noop"
         self.action_streak = 0
         self.ended_by_budget_failure = False
-        self.action_counts = {
-            "scale_service": 0,
-            "reroute_traffic": 0,
-            "rollback_deploy": 0,
-            "quarantine_service": 0,
-            "page_human": 0,
-            "noop": 0,
-        }
 
-        self.reward_trace = []
-        self.downtime_used = 0.0
-        self.previous_traffic = self.task.base_traffic
-        self.last_observed_metrics = {}
-        self.last_scale_target = None
-        self.last_scale_direction = 0
+        scenario_id = self._select_scenario()
+        self.scenario = self._build_scenario(scenario_id)
+        self._apply_scenario_bootstrap()
 
     def reset(self, seed: Optional[int] = None) -> IncidentCommanderObservation:
         if seed is not None:
@@ -179,7 +195,8 @@ class IncidentCommanderEnv:
         self.rng = np.random.default_rng(self.seed)
         self.reward_calculator = RewardCalculator(self.task)
         self._init_state()
-        self._spawn_scheduled_incidents(step_index=0)
+        self._append_timeline("Environment reset; ephemeral filesystem restored")
+        self._append_timeline(f"Scenario seeded: {self.scenario.scenario_id}")
         return self._get_observation()
 
     def step(self, action: IncidentCommanderAction):
@@ -187,16 +204,7 @@ class IncidentCommanderEnv:
             return self._get_observation(), self.last_reward, True, {"error": "Episode already done"}
 
         clean_action = self._sanitize_action(action)
-        contradictory_action = self._is_contradictory_scaling(clean_action)
-
-        unresolved_high_or_critical = sum(
-            1
-            for incident in self.active_incidents
-            if not incident.resolved and incident.severity in {"high", "critical"}
-        )
-        unforced_page = clean_action.action_type == "page_human" and unresolved_high_or_critical == 0
-        if unforced_page:
-            self.unforced_pages += 1
+        self.action_counts[clean_action.action_type] += 1
 
         if clean_action.action_type == self.last_action_type:
             self.action_streak += 1
@@ -204,39 +212,45 @@ class IncidentCommanderEnv:
             self.action_streak = 1
             self.last_action_type = clean_action.action_type
 
-        if clean_action.action_type in self.action_counts:
-            self.action_counts[clean_action.action_type] += 1
+        incorrect_action = False
+        unsafe_action = self._is_unsafe_action(clean_action)
+        if unsafe_action:
+            self.unsafe_actions += 1
 
-        action_result = self._apply_action(clean_action)
-        resolved_ages = self._advance_incidents()
+        action_output, action_effective, incorrect_action = self._apply_action(clean_action)
+        if incorrect_action:
+            self.incorrect_actions += 1
 
-        self._spawn_scheduled_incidents(step_index=self.timestep)
+        self._simulate_scenario_drift()
 
         traffic_profile = self._current_traffic_profile()
         service_loads, uptime_ratio, p95_latency, cost_per_step = self._simulate_traffic(traffic_profile)
 
-        self.previous_traffic = traffic_profile
         self.cumulative_cost += cost_per_step
         self.uptime_history.append(uptime_ratio)
         self.latency_history.append(p95_latency)
         self.downtime_used += max(0.0, 1.0 - uptime_ratio)
 
-        if self.human_attention_steps > 0:
-            self.human_attention_steps -= 1
-            if self.human_attention_steps == 0:
-                self._resolve_highest_severity_incident(force=True)
+        self._update_incidents()
+        unresolved_critical = sum(1 for i in self.active_incidents if not i.resolved and i.severity == "critical")
 
-        unresolved_critical = sum(1 for incident in self.active_incidents if not incident.resolved and incident.severity == "critical")
         self.sla_breaches += self._sla_breaches_this_step(p95_latency, traffic_profile)
 
+        if self.load_test_active_steps > 0:
+            self.load_test_active_steps -= 1
+
+        if self.dev_hint_cooldown > 0:
+            self.dev_hint_cooldown -= 1
+
         observation = self._get_observation(traffic_profile=traffic_profile, uptime=uptime_ratio, p95_latency=p95_latency)
+
         budget_total = max(1e-6, self.task.cost_budget * max(1, self.task.max_steps))
         budget_ratio = self.cumulative_cost / budget_total
-        budget_exhausted = budget_ratio > 1.35
-        if budget_exhausted:
+        if budget_ratio > 1.35:
             self.ended_by_budget_failure = True
 
         burn_budget_ratio = self.downtime_used / max(1e-6, self.burn_budget_total)
+        investigation_coverage = len(self.investigation_targets) / 3.0
 
         reward = self.reward_calculator.calculate(
             obs=observation,
@@ -246,30 +260,36 @@ class IncidentCommanderEnv:
             total_incidents=self.total_incidents,
             cost_ratio=budget_ratio,
             uptime_ratio=uptime_ratio,
-            unforced_page=unforced_page,
+            unforced_page=False,
             action_streak=self.action_streak,
-            mttr_resolved_ages=resolved_ages,
+            mttr_resolved_ages=[incident.age_steps for incident in self.active_incidents if incident.resolved],
             burn_budget_ratio=burn_budget_ratio,
-            contradictory_action=contradictory_action,
+            contradictory_action=False,
+            incorrect_action=incorrect_action,
+            unsafe_action=unsafe_action,
+            investigation_coverage=investigation_coverage,
+            steps_taken=self.timestep + 1,
+            ideal_steps=3,
         )
 
         self.last_reward = reward
-        self.last_action_result = action_result
+        self.last_action_result = action_output
 
         self.reward_trace.append(
             {
                 "step": self.timestep,
                 "phase": self.phase,
+                "scenario": self.scenario.scenario_id,
                 "action": clean_action.action_type,
-                "action_result": action_result,
+                "effective_action": action_effective,
+                "action_result": action_output,
                 "traffic_level": round(traffic_profile, 4),
                 "uptime": round(uptime_ratio, 4),
                 "p95_latency": round(p95_latency, 4),
                 "cost_per_step": round(cost_per_step, 5),
                 "sla_breaches": self.sla_breaches,
                 "reward": reward.model_dump(),
-                "contradictory_action": contradictory_action,
-                "burn_budget_ratio": round(burn_budget_ratio, 5),
+                "investigation_coverage": round(investigation_coverage, 4),
             }
         )
 
@@ -278,415 +298,453 @@ class IncidentCommanderEnv:
             self.timestep >= self.task.max_steps
             or self.sla_breaches >= self.task.max_sla_breaches
             or uptime_ratio < 0.22
-            or budget_exhausted
+            or self.ended_by_budget_failure
+            or self._all_services_recovered()
         )
+
+        if self.done:
+            # Ensure the environment leaves no simulated sockets dangling.
+            self.open_sockets = 0
 
         info = {
             "error": None,
-            "action_result": action_result,
+            "action_result": action_output,
             "service_loads": service_loads,
             "resolved_incidents": self.resolved_incidents,
             "total_incidents": self.total_incidents,
             "budget_ratio": round(budget_ratio, 6),
-            "budget_exhausted": budget_exhausted,
-            "unforced_pages": self.unforced_pages,
             "burn_budget_ratio": round(burn_budget_ratio, 6),
-            "contradictory_action": contradictory_action,
+            "open_sockets": self.open_sockets,
+            "scenario": self.scenario.scenario_id,
         }
         return observation, reward, self.done, info
 
     def _sanitize_action(self, action: IncidentCommanderAction) -> IncidentCommanderAction:
         target_service = action.target_service if action.target_service in self.services else None
         fallback_service = action.fallback_service if action.fallback_service in self.services else None
-        delta_instances = int(np.clip(action.delta_instances, -2, 3))
-        request_fraction = float(np.clip(action.request_fraction, 0.0, 1.0))
         return IncidentCommanderAction(
             action_type=action.action_type,
             target_service=target_service,
-            delta_instances=delta_instances,
-            request_fraction=request_fraction,
+            delta_instances=int(np.clip(action.delta_instances, -2, 3)),
+            request_fraction=float(np.clip(action.request_fraction, 0.0, 1.0)),
             target_version=action.target_version,
             fallback_service=fallback_service,
+            n_lines=int(np.clip(action.n_lines, 1, 100)),
+            config_key=action.config_key,
+            config_value=action.config_value,
+            question=action.question,
+            command=action.command,
             note=action.note,
         )
 
-    def _is_contradictory_scaling(self, action: IncidentCommanderAction) -> bool:
-        contradictory = False
-        if action.action_type == "scale_service" and action.target_service and action.delta_instances != 0:
-            direction = 1 if action.delta_instances > 0 else -1
-            contradictory = (
-                self.last_scale_target == action.target_service
-                and self.last_scale_direction != 0
-                and direction != self.last_scale_direction
-            )
-            self.last_scale_target = action.target_service
-            self.last_scale_direction = direction
-        return contradictory
+    def _is_unsafe_action(self, action: IncidentCommanderAction) -> bool:
+        if action.action_type != "run_command":
+            return False
+        if not action.command:
+            return False
+        dangerous = ["rm -rf", "del /s", "format ", "mkfs", "dd if="]
+        cmd = action.command.lower()
+        return any(token in cmd for token in dangerous) and len(self.investigation_targets) == 0
 
-    def _apply_action(self, action: IncidentCommanderAction) -> str:
-        if action.action_type == "noop":
-            return "no operation"
+    def _apply_action(self, action: IncidentCommanderAction) -> Tuple[str, str, bool]:
+        mapped = self._map_legacy_action(action)
 
-        if action.action_type == "scale_service" and action.target_service:
-            service = self.services[action.target_service]
-            service.desired_instances = max(1, min(8, service.desired_instances + action.delta_instances))
-            service.scale_cooldown_steps = 1
-            service.instances = service.desired_instances
+        if mapped.action_type == "noop":
+            self._append_timeline("Agent paused for observation")
+            return "no operation", "noop", False
 
-            if action.delta_instances > 0 and self.task.task_id in {"longhaul", "blackout"}:
-                spot_add = int(round(action.delta_instances * 0.5))
-                service.spot_instances = max(0, min(service.instances, service.spot_instances + spot_add))
-            if action.delta_instances < 0:
-                service.spot_instances = min(service.spot_instances, service.instances)
+        if mapped.action_type == "get_metrics":
+            target = mapped.target_service or "frontend"
+            self.investigation_targets.add(target)
+            svc = self.services[target]
+            line = f"metrics[{target}] cpu={svc.cpu_utilization:.0f}% mem={svc.memory_utilization:.0f}% p95={svc.p95_latency:.0f}ms err={svc.error_rate:.2f}"
+            self.investigation_log.append(line)
+            self._append_timeline(f"Agent pulled metrics for {target}")
+            return line, "get_metrics", False
 
-            return f"scaled {action.target_service} by {action.delta_instances}"
+        if mapped.action_type == "list_processes":
+            lines = [f"{name}: workers={svc.instances} healthy={str(svc.healthy).lower()}" for name, svc in self.services.items()]
+            self.investigation_targets.update(self.services.keys())
+            output = " | ".join(lines)
+            self.investigation_log.append(output)
+            self._append_timeline("Agent listed cluster processes")
+            return output, "list_processes", False
 
-        if action.action_type == "rollback_deploy" and action.target_service:
-            service = self.services[action.target_service]
-            service.version = service.rollback_version
-            service.rolling_back_steps = 2
-            self._resolve_incidents_for_service(action.target_service, incident_type="bad_deploy")
-            return f"rolled back {action.target_service}"
+        if mapped.action_type == "read_last_n_logs":
+            target = mapped.target_service or "frontend"
+            self.investigation_targets.add(target)
+            output = self._mock_service_log(target, mapped.n_lines)
+            self.investigation_log.append(output)
+            self._append_timeline(f"Agent inspected logs for {target}")
+            return output, "read_last_n_logs", False
 
-        if action.action_type == "quarantine_service" and action.target_service:
-            service = self.services[action.target_service]
-            service.quarantined = True
-            service.healthy = False
-            return f"quarantined {action.target_service}"
+        if mapped.action_type == "check_network_connectivity":
+            source = mapped.target_service or "frontend"
+            dest = mapped.fallback_service or (self.services[source].reachable_upstreams[0] if self.services[source].reachable_upstreams else "db")
+            self.investigation_targets.update({source, dest})
+            ok = self._network_path_ok(source, dest)
+            output = f"netcheck {source}->{dest}: {'ok' if ok else 'timeout'}"
+            self.investigation_log.append(output)
+            self._append_timeline(f"Agent ran network check {source}->{dest}")
+            return output, "check_network_connectivity", False
 
-        if action.action_type == "reroute_traffic" and action.target_service and action.fallback_service:
-            source = self.services[action.target_service]
-            source.redirected_fraction = action.request_fraction
-            return f"rerouted {action.target_service} to {action.fallback_service}"
+        if mapped.action_type == "run_healthcheck":
+            target = mapped.target_service
+            ok = self._healthcheck(target)
+            if ok:
+                self.verification_successes += 1
+            subject = target or "cluster"
+            output = f"healthcheck {subject}: {'pass' if ok else 'fail'}"
+            self._append_timeline(f"Agent verified health for {subject}")
+            return output, "run_healthcheck", False
 
-        if action.action_type == "page_human":
-            self.human_attention_steps = max(self.human_attention_steps, 2)
-            return "human page acknowledged"
+        if mapped.action_type == "ask_developer":
+            hint = self._developer_hint(mapped.question)
+            self.investigation_log.append(f"developer: {hint}")
+            self._append_timeline("Agent requested developer context")
+            return hint, "ask_developer", False
 
-        return "action ignored"
+        if mapped.action_type == "load_test":
+            self.load_test_active_steps = max(self.load_test_active_steps, 2)
+            self._append_timeline("Agent triggered load test")
+            return "load test started", "load_test", False
 
-    def _spawn_scheduled_incidents(self, step_index: int) -> None:
-        if step_index not in self.task.incident_schedule:
-            return
+        if mapped.action_type == "run_command":
+            command = (mapped.command or "").strip().lower()
+            if "kill noisy-neighbor" in command:
+                self.scenario.noisy_neighbor_io = max(0.0, self.scenario.noisy_neighbor_io - 0.75)
+                self._resolve_root_cause("resource_exhaustion")
+                self._append_timeline("Agent killed noisy-neighbor process")
+                return "killed noisy-neighbor", "run_command", False
+            if self._is_unsafe_action(mapped):
+                self._append_timeline("Unsafe destructive command attempted")
+                return "blocked unsafe command", "run_command", True
+            return "command had no effect", "run_command", True
 
-        schedule_index = self.task.incident_schedule.index(step_index)
-        payloads = [
-            ("gateway", "traffic_spike", "medium"),
-            ("inference", "bad_deploy", "high"),
-            ("database", "node_failure", "critical"),
-            ("gateway", "cascade", "critical"),
-            ("inference", "traffic_spike", "high"),
-            ("database", "cache_thrash", "medium"),
-        ]
-        service, incident_type, severity = payloads[schedule_index % len(payloads)]
-        incident = ActiveIncident(
-            incident_id=f"{self.task.task_id}-{step_index}-{schedule_index}",
-            incident_type=incident_type,
-            service=service,
-            severity=severity,
+        if mapped.action_type == "restart_service":
+            if not mapped.target_service:
+                return "restart ignored: missing target", "restart_service", True
+            svc = self.services[mapped.target_service]
+            svc.healthy = True
+            svc.error_rate = max(0.0, svc.error_rate - 0.2)
+            svc.p95_latency = max(70.0, svc.p95_latency * 0.82)
+            svc.memory_utilization = max(35.0, svc.memory_utilization * 0.8)
+            self._append_timeline(f"Agent restarted {mapped.target_service}")
+            return f"restarted {mapped.target_service}", "restart_service", False
+
+        if mapped.action_type == "rollback_deployment":
+            if not mapped.target_service:
+                return "rollback ignored: missing target", "rollback_deployment", True
+            svc = self.services[mapped.target_service]
+            svc.version = svc.rollback_version
+            svc.healthy = True
+            if mapped.target_service == "auth":
+                self._resolve_root_cause("heisenbug")
+            self._append_timeline(f"Agent rolled back {mapped.target_service}")
+            return f"rolled back {mapped.target_service}", "rollback_deployment", False
+
+        if mapped.action_type == "scale_up_replicas":
+            if not mapped.target_service:
+                return "scale ignored: missing target", "scale_up_replicas", True
+            svc = self.services[mapped.target_service]
+            delta = max(1, mapped.delta_instances or 1)
+            svc.instances = int(np.clip(svc.instances + delta, 1, 10))
+            svc.desired_instances = svc.instances
+            svc.error_rate = max(0.0, svc.error_rate - 0.15)
+            self._append_timeline(f"Agent scaled {mapped.target_service} by +{delta}")
+            return f"scaled {mapped.target_service} to {svc.instances}", "scale_up_replicas", False
+
+        if mapped.action_type == "edit_config_line":
+            if not mapped.config_key:
+                return "config edit ignored: missing key", "edit_config_line", True
+            self.config_runtime[mapped.config_key] = mapped.config_value or ""
+            if mapped.config_key == "db_port":
+                self.scenario.db_port_actual = int(mapped.config_value or "0") if str(mapped.config_value or "").isdigit() else -1
+                if self.scenario.db_port_actual == self.scenario.db_port_expected:
+                    self._resolve_root_cause("config_drift")
+            self._append_timeline(f"Agent edited config {mapped.config_key}")
+            return f"edited config {mapped.config_key}", "edit_config_line", False
+
+        return "action ignored", mapped.action_type, True
+
+    def _map_legacy_action(self, action: IncidentCommanderAction) -> IncidentCommanderAction:
+        mapping = {
+            "scale_service": "scale_up_replicas",
+            "rollback_deploy": "rollback_deployment",
+            "page_human": "ask_developer",
+        }
+        mapped_type = mapping.get(action.action_type, action.action_type)
+        return IncidentCommanderAction(
+            action_type=mapped_type,
+            target_service=action.target_service,
+            delta_instances=action.delta_instances,
+            request_fraction=action.request_fraction,
+            target_version=action.target_version,
+            fallback_service=action.fallback_service,
+            n_lines=action.n_lines,
+            config_key=action.config_key,
+            config_value=action.config_value,
+            question=action.question,
+            command=action.command,
+            note=action.note,
         )
-        self.active_incidents.append(incident)
-        self.total_incidents += 1
+
+    def _simulate_scenario_drift(self) -> None:
+        if self.scenario.scenario_id == "resource_exhaustion":
+            self.scenario.noisy_neighbor_io = float(np.clip(self.scenario.noisy_neighbor_io + 0.04, 0.0, 1.2))
+            self.tmp_files.append(f"/tmp/io-spike-{self.timestep}.tmp")
+            if len(self.tmp_files) > 40:
+                self.tmp_files = self.tmp_files[-40:]
+
+        if self.scenario.scenario_id == "heisenbug" and self.load_test_active_steps > 0:
+            self.scenario.heisenbug_armed = True
+            if self._effective_traffic_level() > self.task.base_traffic * 1.6:
+                self.scenario.heisenbug_triggered = True
 
     def _current_traffic_profile(self) -> float:
         if self.task.task_id == "easy":
-            self.phase = "steady"
-            return self.task.base_traffic + 0.03 * self.timestep
+            self.phase = "investigation"
+            base = self.task.base_traffic + (0.02 * self.timestep)
+        elif self.task.task_id == "medium":
+            self.phase = "degradation" if self.timestep < 16 else "recovery"
+            base = self.task.base_traffic if self.timestep < 12 else self.task.peak_traffic * 0.9
+        elif self.task.task_id == "hard":
+            self.phase = "surge" if self.timestep >= 10 else "degradation"
+            base = self.task.peak_traffic if self.timestep >= 10 else self.task.base_traffic
+        elif self.task.task_id == "longhaul":
+            self.phase = "slow-burn" if self.timestep < 24 else "surge"
+            base = self.task.base_traffic * 0.95 if self.timestep < 24 else self.task.peak_traffic
+        else:
+            self.phase = "thundering-herd" if self.timestep >= 8 else "brownout"
+            base = self.task.peak_traffic if self.timestep >= 8 else self.task.base_traffic * 1.15
 
-        if self.task.task_id == "medium":
-            if self.timestep < 10:
-                self.phase = "steady"
-                return self.task.base_traffic
-            if self.timestep < 22:
-                self.phase = "spike"
-                return self.task.peak_traffic
-            self.phase = "recovery"
-            return self.task.base_traffic * 0.95
+        if self.load_test_active_steps > 0:
+            base *= 1.35
+        return float(base)
 
-        if self.task.task_id == "hard":
-            if self.timestep < 8:
-                self.phase = "incident"
-                return self.task.base_traffic
-            if self.timestep < 30:
-                self.phase = "surge"
-                return self.task.peak_traffic
-            self.phase = "containment"
-            return self.task.base_traffic * 0.9
-
-        if self.task.task_id == "longhaul":
-            if self.timestep < 16:
-                self.phase = "silent-leak"
-                return self.task.base_traffic * 0.9
-            if self.timestep < 38:
-                self.phase = "surge"
-                return self.task.peak_traffic
-            self.phase = "stabilization"
-            return self.task.base_traffic * 1.08
-
-        if self.timestep < 12:
-            self.phase = "brownout"
-            return self.task.base_traffic * 1.15
-        if self.timestep < 36:
-            self.phase = "thundering-herd"
-            return self.task.peak_traffic
-        if self.timestep < 56:
-            self.phase = "rollback-window"
-            return self.task.base_traffic * 1.45
-        self.phase = "stabilization"
-        return self.task.base_traffic * 1.05
+    def _effective_traffic_level(self) -> float:
+        return self._current_traffic_profile()
 
     def _simulate_traffic(self, traffic_profile: float):
         service_loads: Dict[str, float] = defaultdict(float)
-        base_weights = {"gateway": 0.25, "inference": 0.50, "database": 0.25}
-        traffic_multiplier = 1.0 + 0.12 * len([i for i in self.active_incidents if not i.resolved])
+        base_weights = {"frontend": 0.45, "auth": 0.30, "db": 0.25}
 
-        for name, service in self.services.items():
-            incident_pressure = 0.0
-            for incident in self.active_incidents:
-                if incident.resolved or incident.service != name:
-                    continue
-                if incident.incident_type == "traffic_spike":
-                    incident_pressure += 0.4 * self.task.spike_multiplier
-                elif incident.incident_type == "bad_deploy":
-                    incident_pressure += 0.35
-                elif incident.incident_type == "node_failure":
-                    incident_pressure += 0.55
-                elif incident.incident_type == "database_lock":
-                    incident_pressure += 0.35
-                elif incident.incident_type == "cache_thrash":
-                    incident_pressure += 0.25
-                elif incident.incident_type == "cascade":
-                    incident_pressure += 0.45
+        db_penalty = 0.0
+        if self.scenario.scenario_id == "resource_exhaustion":
+            db_penalty += 0.35 * self.scenario.noisy_neighbor_io
+        if self.scenario.scenario_id == "config_drift" and self.scenario.db_port_actual != self.scenario.db_port_expected:
+            db_penalty += 0.6
 
-            redirected = 1.0 - service.redirected_fraction if service.redirected_fraction > 0 else 1.0
-            demand = traffic_profile * base_weights[name] * traffic_multiplier
-            demand *= (1.0 + incident_pressure) * redirected
-            if service.quarantined:
-                demand *= 0.15
+        for name, svc in self.services.items():
+            pressure = 1.0
+            if name == "db":
+                pressure += db_penalty
+            if name == "auth" and self.scenario.scenario_id == "heisenbug" and self.scenario.heisenbug_triggered:
+                pressure += 0.7
+            demand = traffic_profile * base_weights[name] * pressure
+            if not svc.healthy:
+                demand *= 1.1
             service_loads[name] = demand
 
         served_total = 0.0
         demand_total = 0.0
         latency_values: List[float] = []
 
-        for name, service in self.services.items():
-            self._apply_spot_disruption(name, service)
+        self._apply_dependency_failures()
 
+        for name, svc in self.services.items():
             demand = service_loads[name]
             demand_total += demand
-            capacity = float(service.instances) * (1.0 if service.healthy else 0.45)
-            if service.scale_cooldown_steps > 0:
-                capacity *= 0.75
-                service.scale_cooldown_steps -= 1
-            if service.rolling_back_steps > 0:
-                capacity *= 0.85
-                service.rolling_back_steps -= 1
-            if service.quarantined:
-                capacity *= 0.2
-
+            capacity = float(max(1, svc.instances)) * (1.0 if svc.healthy else 0.5)
             served = min(demand, capacity)
             served_total += served
             backlog = max(0.0, demand - served)
-            service.queue_depth = int(round(backlog * 10))
 
-            utilization = demand / max(1.0, capacity)
-            base_latency = 65.0 + 105.0 * utilization
-            latency = base_latency + 13.0 * len([i for i in self.active_incidents if not i.resolved and i.service == name])
+            util = demand / max(1.0, capacity)
+            svc.queue_depth = int(round(backlog * 20))
+            svc.cpu_utilization = float(np.clip(35.0 + (util * 52.0), 5.0, 100.0))
+            svc.memory_utilization = float(np.clip(svc.memory_utilization + (util * 4.0), 10.0, 99.0))
+            svc.p95_latency = float(np.clip(75.0 + util * 180.0 + backlog * 20.0, 20.0, 1000.0))
+            svc.error_rate = float(np.clip(backlog / max(0.5, demand), 0.0, 1.0))
 
-            if service.version != "v1":
-                latency *= 0.88
-            if service.quarantined:
-                latency *= 1.1
+            latency_values.append(svc.p95_latency)
 
-            service.cpu_utilization = float(np.clip(35.0 + 60.0 * utilization, 5.0, 100.0))
-            service.memory_utilization = float(np.clip(service.memory_utilization + 3.0 * utilization, 10.0, 99.0))
+        self._apply_dependency_failures()
 
-            if self.task.task_id == "longhaul" and name == "inference" and self.phase == "silent-leak":
-                service.memory_utilization = float(np.clip(service.memory_utilization + 100.0 * self.task.memory_leak_rate, 10.0, 100.0))
-                # Keep silent-leak progression deterministic so the delayed-credit pattern is auditable.
-                service.memory_utilization = float(max(service.memory_utilization, 72.0 + float(self.timestep)))
-
-            if service.memory_utilization > 96.0 and service.healthy:
-                service.healthy = False
-                self._emit_incident_once(name, "node_failure", "high")
-                service.last_action_result = "memory leak crash"
-
-            service.p95_latency = round(float(np.clip(latency, 20.0, 1000.0)), 2)
-            service.error_rate = round(float(np.clip(backlog / max(1.0, demand + 1e-6), 0.0, 1.0)), 4)
-            service.last_action_result = "serving" if backlog <= 0.15 else service.last_action_result or "degraded"
-            latency_values.append(service.p95_latency)
-
-        self._apply_dependency_hell()
-        self._apply_longhaul_failure_window()
-        self._apply_thundering_herd_rules(traffic_profile)
+        cost_per_step = 0.0
+        for svc in self.services.values():
+            cost_per_step += 0.03 * svc.instances
+        cost_per_step += 0.0015 * len(self.tmp_files)
 
         uptime_ratio = 1.0 if demand_total <= 0 else served_total / demand_total
         p95_latency = float(np.percentile(latency_values, 95)) if latency_values else 0.0
 
-        cost_per_step = 0.0
-        for service in self.services.values():
-            on_demand = max(0, service.instances - service.spot_instances)
-            cost_per_step += 0.03 * on_demand
-            cost_per_step += 0.006 * service.spot_instances
-        cost_per_step += 0.04 * sum(1 for incident in self.active_incidents if not incident.resolved)
-        cost_per_step += 0.03 * sum(1 for service in self.services.values() if service.quarantined)
+        return service_loads, float(np.clip(uptime_ratio, 0.0, 1.0)), p95_latency, float(cost_per_step)
 
-        return service_loads, float(np.clip(uptime_ratio, 0.0, 1.0)), float(p95_latency), float(cost_per_step)
+    def _apply_dependency_failures(self) -> None:
+        db = self.services["db"]
+        auth = self.services["auth"]
+        frontend = self.services["frontend"]
 
-    def _apply_dependency_hell(self) -> None:
-        database = self.services["database"]
-        gateway = self.services["gateway"]
+        db_connection_ok = db.healthy and self.scenario.db_port_actual == self.scenario.db_port_expected
 
-        if database.p95_latency > 200:
-            overload = (database.p95_latency - 200.0) / 220.0
-            gateway.cpu_utilization = float(np.clip(gateway.cpu_utilization + 40.0 * overload, 0.0, 100.0))
-            gateway.p95_latency = round(float(np.clip(gateway.p95_latency * (1.0 + 0.45 * overload), 20.0, 1000.0)), 2)
-            gateway.error_rate = round(float(np.clip(gateway.error_rate + 0.12 * overload, 0.0, 1.0)), 4)
-            gateway.last_action_result = "db-latency backpressure"
+        if not db_connection_ok:
+            auth.healthy = False
+            auth.error_rate = max(auth.error_rate, 0.55)
+            auth.p95_latency = max(auth.p95_latency, 320.0)
+            auth.last_action_result = "upstream db connect timeout"
+        else:
+            auth.healthy = True
 
-    def _apply_spot_disruption(self, name: str, service: ServiceState) -> None:
-        if service.spot_instances <= 0 or self.task.spot_disruption_chance <= 0.0:
-            return
+        if not auth.healthy:
+            frontend.healthy = False
+            frontend.error_rate = max(frontend.error_rate, 0.50)
+            frontend.p95_latency = max(frontend.p95_latency, 360.0)
+            frontend.last_action_result = "auth dependency failure -> 404/500"
+        else:
+            frontend.healthy = True
 
-        lost = 0
-        for _ in range(service.spot_instances):
-            if self.rng.random() < self.task.spot_disruption_chance:
-                lost += 1
-
-        if lost <= 0:
-            return
-
-        service.instances = max(1, service.instances - lost)
-        service.desired_instances = max(service.instances, service.desired_instances - lost)
-        service.spot_instances = max(0, service.spot_instances - lost)
-        self._emit_incident_once(name, "node_failure", "high")
-        service.last_action_result = f"spot interruption lost={lost}"
-
-    def _apply_thundering_herd_rules(self, traffic_profile: float) -> None:
-        if not self.task.thundering_herd:
-            return
-
-        traffic_roc = traffic_profile - self.previous_traffic
-        inference = self.services["inference"]
-
-        if self.phase == "thundering-herd" and traffic_roc > 0.18 and inference.instances <= 5:
-            self._emit_incident_once("database", "database_lock", "critical")
-            self.services["database"].last_action_result = "lock contention from under-scaling"
-
-        if self.phase == "thundering-herd" and inference.instances >= 8:
-            self.cumulative_cost += 0.08
-
-    def _apply_longhaul_failure_window(self) -> None:
-        if self.task.task_id != "longhaul" or self.phase != "surge":
-            return
-
-        inference = self.services["inference"]
-        # If inference is still underscaled when surge begins after leak accumulation,
-        # force node-failure pressure that proactive scaling would have avoided.
-        if inference.instances <= 4 and inference.memory_utilization >= 88.0:
-            self._emit_incident_once("inference", "node_failure", "critical")
-            inference.p95_latency = round(float(np.clip(inference.p95_latency * 1.35, 20.0, 1000.0)), 2)
-            inference.error_rate = round(float(np.clip(inference.error_rate + 0.22, 0.0, 1.0)), 4)
-            inference.healthy = False
-            inference.last_action_result = "surge collapse after silent leak"
-
-    def _emit_incident_once(self, service: str, incident_type: str, severity: str) -> None:
-        for incident in self.active_incidents:
-            if not incident.resolved and incident.service == service and incident.incident_type == incident_type:
-                return
-
-        self.active_incidents.append(
-            ActiveIncident(
-                incident_id=f"auto-{self.task.task_id}-{self.timestep}-{service}-{incident_type}",
-                incident_type=incident_type,
-                service=service,
-                severity=severity,
-            )
-        )
-        self.total_incidents += 1
-
-    def _sla_breaches_this_step(self, p95_latency: float, traffic_profile: float) -> int:
-        breaches = 0
-        if p95_latency > 280:
-            breaches += 1
-        if p95_latency > 420:
-            breaches += 1
-        if traffic_profile > self.task.base_traffic * 1.5 and p95_latency > 250:
-            breaches += 1
-        if any(not incident.resolved and incident.severity == "critical" and incident.age_steps >= 4 for incident in self.active_incidents):
-            breaches += 1
-        return breaches
-
-    def _advance_incidents(self) -> List[int]:
-        resolved_ages: List[int] = []
+    def _update_incidents(self) -> None:
         for incident in self.active_incidents:
             if incident.resolved:
                 continue
             incident.age_steps += 1
-            if incident.resolution_timer > 0:
-                incident.resolution_timer -= 1
-                if incident.resolution_timer == 0:
-                    incident.resolved = True
-                    resolved_ages.append(incident.age_steps)
-                    self.resolved_incidents += 1
-                    self.services[incident.service].healthy = True
-                    self.services[incident.service].quarantined = False
-            elif incident.incident_type == "traffic_spike" and self.timestep > 0 and incident.age_steps >= 3:
-                incident.resolved = True
-                resolved_ages.append(incident.age_steps)
-                self.resolved_incidents += 1
-            elif incident.incident_type == "bad_deploy" and self.services[incident.service].version == "v0":
-                incident.resolved = True
-                resolved_ages.append(incident.age_steps)
-                self.resolved_incidents += 1
-                self.services[incident.service].healthy = True
-            elif incident.incident_type == "node_failure" and self.services[incident.service].instances >= 3:
-                incident.resolved = True
-                resolved_ages.append(incident.age_steps)
-                self.resolved_incidents += 1
-                self.services[incident.service].healthy = True
-            elif incident.incident_type == "cache_thrash" and self.services[incident.service].instances >= 4:
-                incident.resolved = True
-                resolved_ages.append(incident.age_steps)
-                self.resolved_incidents += 1
-            elif incident.incident_type == "cascade" and self.services[incident.service].quarantined:
-                incident.resolved = True
-                resolved_ages.append(incident.age_steps)
-                self.resolved_incidents += 1
 
-        if self.timestep >= 2 and self.task.task_id in {"hard", "longhaul", "blackout"}:
-            unresolved = [i for i in self.active_incidents if not i.resolved]
-            required_unresolved = 2 if self.task.task_id != "blackout" else 3
-            if len(unresolved) >= required_unresolved:
-                self._emit_incident_once("gateway", "cascade", "critical")
+        self._sync_incident("frontend", "cascade", "critical", not self.services["frontend"].healthy)
+        self._sync_incident("auth", "bad_deploy", "high", not self.services["auth"].healthy)
+        self._sync_incident("db", "database_lock", "critical", not self.services["db"].healthy or self.scenario.db_port_actual != self.scenario.db_port_expected)
 
-        return resolved_ages
-
-    def _resolve_incidents_for_service(self, service_name: str, incident_type: Optional[str] = None) -> None:
         for incident in self.active_incidents:
-            if incident.resolved or incident.service != service_name:
+            if incident.resolved:
                 continue
-            if incident_type is None or incident.incident_type == incident_type:
+            service_ok = self.services[incident.service].healthy
+            if incident.incident_type == "database_lock":
+                service_ok = service_ok and self.scenario.db_port_actual == self.scenario.db_port_expected
+            if service_ok:
                 incident.resolved = True
                 self.resolved_incidents += 1
-        self.services[service_name].healthy = True
-        self.services[service_name].quarantined = False
 
-    def _resolve_highest_severity_incident(self, force: bool = False) -> None:
-        unresolved = [incident for incident in self.active_incidents if not incident.resolved]
-        if not unresolved:
+    def _sync_incident(self, service: str, incident_type: str, severity: str, condition: bool) -> None:
+        existing = None
+        for incident in self.active_incidents:
+            if incident.service == service and incident.incident_type == incident_type and not incident.resolved:
+                existing = incident
+                break
+
+        if condition and existing is None:
+            self.active_incidents.append(
+                ActiveIncident(
+                    incident_id=f"{self.task.task_id}-{self.timestep}-{service}-{incident_type}",
+                    incident_type=incident_type,
+                    service=service,
+                    severity=severity,
+                )
+            )
+            self.total_incidents += 1
+
+    def _sla_breaches_this_step(self, p95_latency: float, traffic_profile: float) -> int:
+        breaches = 0
+        if p95_latency > 280.0:
+            breaches += 1
+        if p95_latency > 420.0:
+            breaches += 1
+        if traffic_profile > self.task.base_traffic * 1.4 and p95_latency > 250.0:
+            breaches += 1
+        if not self.services["frontend"].healthy:
+            breaches += 1
+        return breaches
+
+    def _all_services_recovered(self) -> bool:
+        if self.timestep < 3:
+            return False
+        all_healthy = all(service.healthy for service in self.services.values())
+        return all_healthy and self.scenario.db_port_actual == self.scenario.db_port_expected and self.scenario.noisy_neighbor_io < 0.2 and not self.scenario.heisenbug_triggered
+
+    def _network_path_ok(self, source: str, dest: str) -> bool:
+        if source not in self.services or dest not in self.services:
+            return False
+        if dest == "db" and self.scenario.db_port_actual != self.scenario.db_port_expected:
+            return False
+        return self.services[source].healthy and self.services[dest].healthy
+
+    def _healthcheck(self, target: Optional[str]) -> bool:
+        if target and target in self.services:
+            svc = self.services[target]
+            if target == "db":
+                return svc.healthy and self.scenario.db_port_actual == self.scenario.db_port_expected
+            return svc.healthy and svc.error_rate < 0.2 and svc.p95_latency < 260
+        return self._all_services_recovered()
+
+    def _mock_service_log(self, service: str, n_lines: int) -> str:
+        if service == "frontend":
+            if not self.services["frontend"].healthy:
+                return f"[{n_lines} lines] GET /api/login -> 404 upstream auth unavailable"
+            return f"[{n_lines} lines] frontend stable"
+        if service == "auth":
+            if self.scenario.db_port_actual != self.scenario.db_port_expected:
+                return f"[{n_lines} lines] auth db dial tcp db:{self.scenario.db_port_actual} connection refused"
+            if self.scenario.heisenbug_triggered:
+                return f"[{n_lines} lines] panic: race condition in token cache under high load"
+            return f"[{n_lines} lines] auth stable"
+        if service == "db":
+            if self.scenario.noisy_neighbor_io > 0.4:
+                return f"[{n_lines} lines] db io wait above threshold noisy-neighbor detected"
+            if self.scenario.db_port_actual != self.scenario.db_port_expected:
+                return f"[{n_lines} lines] db listening on {self.scenario.db_port_expected}; clients using wrong port"
+            return f"[{n_lines} lines] db stable"
+        return f"[{n_lines} lines] unknown service"
+
+    def _developer_hint(self, question: Optional[str]) -> str:
+        if self.dev_hint_cooldown > 0:
+            return "Developer is busy. Try again next step."
+        self.dev_hint_cooldown = 2
+
+        if self.scenario.scenario_id == "config_drift":
+            return "We pushed an auth config update 10 minutes ago. Might have changed DB connection settings."
+        if self.scenario.scenario_id == "heisenbug":
+            return "Auth started flaking only during traffic spikes after the latest deployment."
+        return "Infra reported a noisy-neighbor process saturating disk IO on the DB node."
+
+    def _resolve_root_cause(self, scenario_id: str) -> None:
+        if self.scenario.scenario_id != scenario_id:
             return
-        priority = {"low": 0, "medium": 1, "high": 2, "critical": 3}
-        target = max(unresolved, key=lambda item: priority[item.severity])
-        target.resolved = True
-        self.resolved_incidents += 1
-        self.services[target.service].healthy = True
-        self.services[target.service].quarantined = False
-        if force:
-            target.resolution_timer = 0
+        self.root_cause_resolutions += 1
+        if scenario_id == "resource_exhaustion":
+            self.scenario.noisy_neighbor_io = 0.0
+        if scenario_id == "config_drift":
+            self.scenario.db_port_actual = self.scenario.db_port_expected
+            self.config_runtime["db_port"] = str(self.scenario.db_port_expected)
+        if scenario_id == "heisenbug":
+            self.scenario.heisenbug_triggered = False
+            self.scenario.heisenbug_armed = False
+
+    def _select_scenario(self) -> str:
+        choices = self.task.scenario_mix or ["resource_exhaustion"]
+        index = int(self.rng.integers(0, len(choices)))
+        return choices[index]
+
+    def _build_scenario(self, scenario_id: str) -> ScenarioState:
+        if scenario_id == "resource_exhaustion":
+            return ScenarioState(scenario_id="resource_exhaustion", noisy_neighbor_io=0.45)
+        if scenario_id == "config_drift":
+            return ScenarioState(scenario_id="config_drift", db_port_expected=5432, db_port_actual=15432)
+        return ScenarioState(scenario_id="heisenbug", heisenbug_armed=False, heisenbug_triggered=False)
+
+    def _apply_scenario_bootstrap(self) -> None:
+        if self.scenario.scenario_id == "config_drift":
+            self.config_broken["db_port"] = str(self.scenario.db_port_actual)
+            self.config_runtime = dict(self.config_broken)
+        if self.scenario.scenario_id == "heisenbug":
+            self.services["auth"].version = "v1-buggy"
+
+    def _append_timeline(self, message: str) -> None:
+        timestamp = f"12:00:{self.timestep:02d}"
+        self.live_timeline.append(f"{timestamp} - {message}")
+        if len(self.live_timeline) > 120:
+            self.live_timeline = self.live_timeline[-120:]
 
     def _apply_observation_noise(self, services: Dict[str, ServiceState]) -> None:
-        if self.timestep <= 0 or self.task.observation_noise <= 0.0:
+        if self.task.observation_noise <= 0:
             for name, service in services.items():
                 service.observed_p95_latency = service.p95_latency
                 service.observed_error_rate = service.error_rate
@@ -696,14 +754,8 @@ class IncidentCommanderEnv:
 
         for name, service in services.items():
             delayed = self.rng.random() < self.task.observation_noise
-            missing = self.rng.random() < (self.task.observation_noise * 0.35)
-
             prev_latency, prev_error = self.last_observed_metrics.get(name, (service.p95_latency, service.error_rate))
-            if missing:
-                service.observed_p95_latency = None
-                service.observed_error_rate = prev_error
-                service.metric_staleness_steps += 1
-            elif delayed:
+            if delayed and self.timestep > 0:
                 service.observed_p95_latency = prev_latency
                 service.observed_error_rate = prev_error
                 service.metric_staleness_steps = max(1, service.metric_staleness_steps + 1)
@@ -711,8 +763,59 @@ class IncidentCommanderEnv:
                 service.observed_p95_latency = service.p95_latency
                 service.observed_error_rate = service.error_rate
                 service.metric_staleness_steps = 0
-
             self.last_observed_metrics[name] = (service.observed_p95_latency, service.observed_error_rate)
+
+    def _symptoms_view(self) -> List[str]:
+        frontend = self.services["frontend"]
+        auth = self.services["auth"]
+        symptoms: List[str] = []
+        if not frontend.healthy:
+            symptoms.append("frontend returns 404/500 for login and checkout")
+        if frontend.p95_latency > 280:
+            symptoms.append("frontend p95 latency above SLO")
+        if auth.error_rate > 0.3:
+            symptoms.append("auth error burst detected")
+        if self.sla_breaches > 0:
+            symptoms.append("SLA breach counter increasing")
+        if not symptoms:
+            symptoms.append("customer traffic looks stable")
+        return symptoms
+
+    def _masked_incidents(self) -> List[ActiveIncident]:
+        masked: List[ActiveIncident] = []
+        for incident in self.active_incidents:
+            label = incident.incident_type
+            if incident.service in {"auth", "db"} and incident.service not in self.investigation_targets:
+                label = "cascade"
+            masked.append(
+                ActiveIncident(
+                    incident_id=incident.incident_id,
+                    incident_type=label,
+                    service=incident.service,
+                    severity=incident.severity,
+                    age_steps=incident.age_steps,
+                    resolved=incident.resolved,
+                    resolution_timer=incident.resolution_timer,
+                )
+            )
+        return masked
+
+    def _available_actions(self) -> List[str]:
+        return [
+            "get_metrics",
+            "list_processes",
+            "read_last_n_logs",
+            "check_network_connectivity",
+            "restart_service",
+            "rollback_deployment",
+            "scale_up_replicas",
+            "edit_config_line",
+            "run_healthcheck",
+            "ask_developer",
+            "load_test",
+            "run_command",
+            "noop",
+        ]
 
     def _get_observation(self, traffic_profile: float = 0.0, uptime: float = 1.0, p95_latency: float = 80.0) -> IncidentCommanderObservation:
         services = {name: service.model_copy(deep=True) for name, service in self.services.items()}
@@ -720,7 +823,7 @@ class IncidentCommanderEnv:
 
         return IncidentCommanderObservation(
             services=services,
-            active_incidents=[incident.model_copy(deep=True) for incident in self.active_incidents],
+            active_incidents=self._masked_incidents(),
             step=self.timestep,
             step_budget=self.task.max_steps,
             traffic_level=round(traffic_profile, 4),
@@ -730,6 +833,12 @@ class IncidentCommanderEnv:
             cost_per_step=round(self.cumulative_cost, 4),
             last_action_result=self.last_action_result,
             phase=self.phase,
+            symptoms=self._symptoms_view(),
+            terminal_output=self.investigation_log[-5:],
+            investigation_log=self.investigation_log[-20:],
+            live_timeline=self.live_timeline[-30:],
+            available_actions=self._available_actions(),
+            scenario_hint="Root cause is hidden until investigated",
         )
 
     def get_state(self) -> Dict[str, object]:
@@ -738,11 +847,15 @@ class IncidentCommanderEnv:
             "step": self.timestep,
             "services": {name: service.model_dump() for name, service in self.services.items()},
             "active_incidents": [incident.model_dump() for incident in self.active_incidents],
+            "scenario": self.scenario.model_dump(),
+            "config_runtime": dict(self.config_runtime),
+            "tmp_files": list(self.tmp_files),
             "sla_breaches": self.sla_breaches,
             "resolved_incidents": self.resolved_incidents,
             "total_incidents": self.total_incidents,
             "cumulative_cost": round(self.cumulative_cost, 4),
             "phase": self.phase,
+            "open_sockets": self.open_sockets,
             "burn_budget_ratio": round(self.downtime_used / max(1e-6, self.burn_budget_total), 6),
         }
 
@@ -752,12 +865,16 @@ class IncidentCommanderEnv:
         latency_score = max(0.0, min(1.0, 1.0 - avg_latency / 700.0))
         strict_sla_window = self.task.max_steps // 8 if self.task.task_id in {"hard", "longhaul", "blackout"} else self.task.max_steps // 4
         sla_score = max(0.0, min(1.0, 1.0 - self.sla_breaches / max(1, strict_sla_window)))
-        budget_scale = 0.85 if self.task.task_id in {"hard", "longhaul", "blackout"} else 1.0
-        cost_score = max(0.0, min(1.0, 1.0 - self.cumulative_cost / max(1e-6, self.task.cost_budget * self.task.max_steps * budget_scale)))
+        cost_score = max(0.0, min(1.0, 1.0 - self.cumulative_cost / max(1e-6, self.task.cost_budget * self.task.max_steps)))
         recovery_score = max(0.0, min(1.0, self.resolved_incidents / max(1, self.total_incidents)))
+
         action_total = max(1, self.timestep)
-        passive_ratio = (self.action_counts["noop"] + self.unforced_pages) / action_total
+        passive_ratio = self.action_counts["noop"] / action_total
         action_discipline_score = max(0.0, min(1.0, 1.0 - passive_ratio))
+
+        root_cause_identification_rate = max(0.0, min(1.0, len(self.investigation_targets) / 3.0))
+        safe_ops_score = max(0.0, min(1.0, 1.0 - (self.unsafe_actions / action_total)))
+        verification_score = max(0.0, min(1.0, self.verification_successes / max(1, self.action_counts["run_healthcheck"])))
 
         return {
             "uptime_score": round(uptime_score, 6),
@@ -767,19 +884,27 @@ class IncidentCommanderEnv:
             "cost_score": round(cost_score, 6),
             "recovery_score": round(recovery_score, 6),
             "action_discipline_score": round(action_discipline_score, 6),
+            "root_cause_identification_rate": round(root_cause_identification_rate, 6),
+            "safe_ops_score": round(safe_ops_score, 6),
+            "verification_score": round(verification_score, 6),
             "burn_budget_ratio": round(self.downtime_used / max(1e-6, self.burn_budget_total), 6),
+            "timeline": self.live_timeline,
             "reward_trace": self.reward_trace,
         }
 
     def build_episode_result(self) -> EpisodeResult:
         metrics = self.get_metrics()
         total = (
-            0.35 * float(metrics["uptime_score"])
-            + 0.20 * float(metrics["latency_score"])
-            + 0.20 * float(metrics["sla_score"])
-            + 0.15 * float(metrics["cost_score"])
+            0.28 * float(metrics["uptime_score"])
+            + 0.16 * float(metrics["latency_score"])
+            + 0.18 * float(metrics["sla_score"])
+            + 0.10 * float(metrics["cost_score"])
             + 0.10 * float(metrics["recovery_score"])
+            + 0.08 * float(metrics["root_cause_identification_rate"])
+            + 0.05 * float(metrics["safe_ops_score"])
+            + 0.05 * float(metrics["verification_score"])
         )
+
         return EpisodeResult(
             task_id=self.task.task_id,
             uptime_score=float(metrics["uptime_score"]),
@@ -791,8 +916,14 @@ class IncidentCommanderEnv:
             ended_by_sla_failure=self.sla_breaches >= self.task.max_sla_breaches,
             ended_by_budget_failure=self.ended_by_budget_failure,
             action_discipline_score=float(metrics["action_discipline_score"]),
-            escalations_used=self.action_counts["page_human"],
+            escalations_used=self.action_counts["ask_developer"],
             sla_breaches=self.sla_breaches,
             burn_budget_ratio=float(metrics["burn_budget_ratio"]),
+            root_cause_identification_rate=float(metrics["root_cause_identification_rate"]),
+            safe_ops_score=float(metrics["safe_ops_score"]),
+            verification_score=float(metrics["verification_score"]),
+            db_recovered=self.services["db"].healthy and self.scenario.db_port_actual == self.scenario.db_port_expected,
+            auth_recovered=self.services["auth"].healthy,
+            frontend_recovered=self.services["frontend"].healthy,
             total_score=round(max(0.0, min(1.0, total)), 6),
         )
