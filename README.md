@@ -418,6 +418,252 @@ For a complete final pass, use `PRE_SUBMISSION_CHECKLIST.md`.
 - Uses a lightweight service simulation so the environment stays portable on CPU-only machines.
 - Keeps the state machine small enough for fast iteration but rich enough to model real operational decisions.
 - Rewards are decomposed for judge readability and debugging.
+
+---
+
+## Architecture deep dive
+
+Incident Commander is organized to keep simulation logic, scoring logic, and serving logic cleanly separated.
+
+### Runtime components
+
+- Environment core (`app/env.py`): state transitions, scenario progression, action effects, incident generation, and step-level telemetry.
+- Reward engine (`app/reward.py`): decomposed reward terms with explicit anti-exploit penalties.
+- Typed contracts (`app/models.py`): action/observation/reward/task and episode result Pydantic models.
+- API layer (`app/main.py`): OpenEnv-compatible endpoints, benchmark helpers, and judge-facing report surfaces.
+- Task graders (`server/tasks.py`): deterministic per-task scoring from aggregated episode outcomes.
+
+### Why this split helps judges
+
+- It makes behavior auditable: environment transition bugs are isolated from grader bugs.
+- It improves reproducibility: task definition + seed uniquely determine episode dynamics.
+- It improves safety: action validation and sanitization happen before state mutation.
+
+---
+
+## Scenario mechanics by root cause
+
+The same API can produce very different incident patterns depending on scenario selection. This allows broad policy evaluation without changing endpoint semantics.
+
+### `resource_exhaustion`
+
+- Models noisy-neighbor IO contention on DB.
+- Pressure accumulates over time and can trigger frontend/auth degradation through dependency effects.
+- Mitigation patterns: inspection + targeted DB stabilization + verification.
+
+### `config_drift`
+
+- Models stale application configuration (`db_port` mismatch).
+- Symptoms are intentionally indirect at first (auth failures, elevated latency).
+- Mitigation pattern: diagnose via logs, patch runtime config, verify health.
+
+### `heisenbug`
+
+- Models race-condition instability under elevated load.
+- Can look benign under low load and fail only during surge windows.
+- Mitigation pattern: rollback + controlled verification under load.
+
+### `regional_outage`
+
+- Models cross-zone packet loss and replication lag.
+- Local service checks may appear healthy while end-to-end behavior degrades.
+- Mitigation pattern: network diagnostics + DB failover.
+
+---
+
+## State transition timeline (single step)
+
+For each `step(action)` call:
+
+1. Action is sanitized and validated.
+2. Unsafe or incorrect behavior signals are tracked.
+3. Action effect is applied to mutable environment state.
+4. Scheduled incident shocks may inject additional pressure.
+5. Scenario drift is advanced.
+6. Dependency-aware traffic simulation computes service load, latency, and uptime.
+7. Active incidents are synchronized and resolved/incurred as needed.
+8. Reward is computed from decomposed terms.
+9. Step trace and timeline are appended for auditability.
+10. Terminal conditions are evaluated (`max_steps`, SLA failure, collapse, budget failure, full recovery).
+
+This sequencing is deliberate: it ensures the agent is scored against the consequences of both its chosen action and contemporaneous environment dynamics.
+
+---
+
+## API payload examples
+
+### Reset
+
+```bash
+curl -X POST "http://localhost:7860/reset?task_id=hard&seed=42"
+```
+
+Example response (trimmed):
+
+```json
+{
+  "task_id": "hard",
+  "observation": {
+    "step": 0,
+    "phase": "degradation",
+    "traffic_level": 0.0,
+    "services": {
+      "frontend": {"healthy": true, "instances": 3},
+      "auth": {"healthy": true, "instances": 3},
+      "db": {"healthy": true, "instances": 2}
+    },
+    "active_incidents": []
+  }
+}
+```
+
+### Step
+
+```bash
+curl -X POST "http://localhost:7860/step?task_id=hard" \
+  -H "Content-Type: application/json" \
+  -d '{"action_type":"read_last_n_logs","target_service":"auth","n_lines":30}'
+```
+
+Example response (trimmed):
+
+```json
+{
+  "done": false,
+  "reward": {
+    "total": 0.41,
+    "uptime": 0.86,
+    "latency": 0.72,
+    "sla": 0.80,
+    "cost": 0.91,
+    "recovery": 0.33
+  },
+  "info": {
+    "action_result": "[30 lines] auth ...",
+    "scenario": "config_drift"
+  }
+}
+```
+
+### Grade
+
+```bash
+curl "http://localhost:7860/grade?task_id=hard"
+```
+
+Example response (trimmed):
+
+```json
+{
+  "task_id": "hard",
+  "score": 0.57,
+  "details": {
+    "uptime_score": 0.74,
+    "latency_score": 0.62,
+    "sla_score": 0.59,
+    "cost_score": 0.77,
+    "recovery_score": 0.55
+  }
+}
+```
+
+---
+
+## Reproducibility protocol
+
+To reproduce benchmark numbers reliably:
+
+1. Use fixed seeds (for example `42..51`) for all policy comparisons.
+2. Keep `MODEL_NAME`, `API_BASE_URL`, and sampling parameters fixed for LLM runs.
+3. Capture both aggregate grade and reward trace (`/metrics?include_trace=true`).
+4. Report means and distribution summary (min/max/std when possible), not just a single run.
+5. Compare policies on identical seed sets.
+
+Recommended reporting table:
+
+| Policy | Task | Seeds | Avg Score | Min | Max |
+|---|---|---:|---:|---:|---:|
+| noop | hard | 10 | ... | ... | ... |
+| greedy | hard | 10 | ... | ... | ... |
+| reasoning | hard | 10 | ... | ... | ... |
+
+---
+
+## Determinism and fairness guarantees
+
+- Graders are deterministic and bounded in `[0.0, 1.0]`.
+- Reset with the same `task_id` and `seed` starts from the same initial state.
+- Action schema is typed and sanitized before mutation.
+- Reward trace preserves per-step decomposition for post-hoc auditing.
+- Episode failure modes are explicit (`ended_by_sla_failure`, `ended_by_budget_failure`).
+
+---
+
+## Performance profile and constraints
+
+The environment is designed for hackathon constraints (2 vCPU / 8 GB RAM) and target runtime under 20 minutes.
+
+### Expected behavior on constrained machines
+
+- API boot: fast startup with CPU-only dependencies.
+- Step throughput: lightweight simulation loop with bounded per-step complexity.
+- Memory behavior: bounded timeline and trace buffers with rolling truncation.
+- No GPU dependency: all workload simulation is synthetic and deterministic under seed.
+
+---
+
+## Troubleshooting matrix
+
+| Symptom | Likely cause | Fast fix |
+|---|---|---|
+| `/reset` returns non-200 on Space | Space still starting / container boot issue | Check Space logs, confirm app binds `0.0.0.0:7860` |
+| `openenv validate` fails task checks | Mismatch between endpoint behavior and task metadata | Re-run local `scripts/test-local.py`, verify `/tasks` and graders |
+| Inference script returns no model output | Missing `HF_TOKEN` or provider issue | Set `HF_TOKEN`; script will fallback to deterministic heuristic |
+| Score unexpectedly low on hard tasks | Reactive actions without early investigation | Use logs + metrics first, then remediate, then verify |
+| Repeated SLA collapses in blackout | Over/under-scaling oscillation | Use phase-aware scaling and preserve budget headroom |
+
+---
+
+## Security and safety notes
+
+- Destructive shell-like actions are safety-penalized when used recklessly.
+- Unsafe command attempts are explicitly tracked in episode metrics.
+- The environment is simulation-only and does not execute privileged host operations.
+- Reward shaping discourages exploitative loops (`noop` spam, unforced escalation, contradictory remediations).
+
+---
+
+## Evaluator FAQ
+
+### Does this require internet access to run locally?
+
+No for environment execution and grading. Internet is only needed for remote LLM calls in `inference.py` when using provider-backed inference.
+
+### Can this be evaluated without a model token?
+
+Yes. The inference script includes a deterministic heuristic fallback path when `HF_TOKEN` is not set.
+
+### How do I verify that all tasks are wired correctly?
+
+Use `/tasks` for discovery and run `scripts/test-local.py` after starting the server.
+
+### Where can judges inspect full decision traces?
+
+Use `/metrics?task_id=<task>&include_trace=true` and `/report?task_id=<task>`.
+
+### What demonstrates non-trivial RL behavior most clearly?
+
+Compare `noop`, `greedy`, and `reasoning` policies on `hard`, `longhaul`, and `blackout` over shared fixed seeds.
+
+---
+
+## Suggested extension ideas (post-hackathon)
+
+- Multi-agent mode: primary commander + specialist responder roles.
+- Operator handoff memory: cross-episode context transfer under shift changes.
+- Richer network topology: region-level service graphs with partial failover.
+- Counterfactual evaluator: compare chosen action to oracle action under same state.
+- Human-in-the-loop benchmark mode with explicit intervention budget.
 - The longhaul task adds a stronger delayed-credit signal without making the environment brittle.
 
 ## Repository structure
