@@ -53,6 +53,27 @@ The policy challenge is also **cognitive load under uncertainty**: observations 
 - The action space mirrors production workflows (scale, reroute, rollback, quarantine, escalate) used in Kubernetes/Terraform-style operations.
 - The agent must manage uncertainty from noisy or delayed telemetry, not just react to clean threshold signals.
 
+## Why RL and not just prompting
+
+This environment is not a one-shot question-answer task. The agent acts in a stateful system where actions change future dynamics, and the return depends on multi-step consequences.
+
+Why prompting alone is insufficient:
+
+- Delayed credit assignment: beneficial actions can reduce short-term reward before improving long-horizon survival.
+- Non-stationarity: phase changes (`steady`, `surge`, `silent-leak`, `thundering-herd`) require policy adaptation mid-episode.
+- Partial observability: metrics can be stale or missing, so the agent must infer hidden state from secondary signals.
+- Coupled failures: local fixes can worsen global behavior (for example, DB latency backpressure amplifying gateway load).
+
+A purely reactive prompt policy can look competent on simple episodes but fails on high-pressure horizons where planning depth matters.
+
+## What changed in this version
+
+- Added cascading dependency dynamics (`database` latency can amplify `gateway` pressure).
+- Added noisy/stale observations (`observed_p95_latency`, `metric_staleness_steps`) to force uncertainty-aware control.
+- Added spot-instance economics and interruption risk in advanced tasks.
+- Added `longhaul` silent-leak behavior and `blackout` thundering-herd behavior.
+- Added per-step reward trace in `/metrics` for full auditability.
+
 ---
 
 ## Environment overview
@@ -169,6 +190,8 @@ Per-step reward is decomposed and inspectable:
 
 The environment keeps a per-step reward trace and exposes it through `/metrics` for judge auditability.
 
+The MTTR and anti-panic terms are intentional differentiators: they reward fast, stable incident management rather than noisy action spam.
+
 ### Anti-exploit safeguards
 
 The environment includes explicit controls to reduce reward hacking and brittle policies:
@@ -183,11 +206,11 @@ These safeguards make high scores correlate with operationally meaningful behavi
 
 Each task has a deterministic grader that returns a score in the range [0.0, 1.0]. Graders are designed to reward partial progress rather than forcing binary success or failure.
 
-- easy emphasizes restoring the first degraded service quickly
-- medium emphasizes rollback plus scaling under pressure
-- hard emphasizes stopping cascading failures before the platform collapses
-- longhaul emphasizes sustaining performance across repeated incidents and shifting load
-- blackout emphasizes outage survival with strict SLA and budget limits under sustained stress
+- easy emphasizes restoring the first degraded service quickly.
+- medium emphasizes rollback plus scaling under pressure.
+- hard emphasizes stopping cascading failures before the platform collapses.
+- longhaul emphasizes proactive leak mitigation before visible outage.
+- blackout emphasizes thundering-herd survival with strict SLA burn-budget control.
 
 The grader favors uptime, latency, SLA protection, cost discipline, incident recovery, and escalation discipline rather than a single brittle metric.
 
@@ -238,11 +261,23 @@ openenv validate
 
 ## Inference
 
+Linux/macOS:
+
 ```bash
 export API_BASE_URL="https://router.huggingface.co/v1"
 export MODEL_NAME="Qwen/Qwen2.5-72B-Instruct"
 export HF_TOKEN="hf_your_token_here"
 export ENV_URL="http://localhost:7860"
+python inference.py
+```
+
+PowerShell (Windows):
+
+```powershell
+$env:API_BASE_URL = "https://router.huggingface.co/v1"
+$env:MODEL_NAME = "Qwen/Qwen2.5-72B-Instruct"
+$env:HF_TOKEN = "hf_your_token_here"
+$env:ENV_URL = "http://localhost:7860"
 python inference.py
 ```
 
@@ -263,14 +298,16 @@ Measured with `python greedy_baseline.py` over fixed seeds (`42..51`):
 | easy | 0.985 | 1.000 | 1.000 |
 | medium | 0.913 | 0.971 | 0.971 |
 | hard | 0.240 | 0.324 | 0.324 |
-| longhaul | 0.240 | 0.326 | 0.297 |
+| longhaul | 0.251 | 0.337 | 0.270 |
 | blackout | 0.078 | 0.040 | 0.331 |
 
 Interpretation:
 
 - easy/medium are intentionally accessible to verify API correctness and grading behavior.
+- medium noop is high because incident pressure is recoverable in this calibration and the task is designed as a bridge from easy to hard; discriminative difficulty is concentrated in hard/longhaul/blackout.
 - hard/longhaul stay below 0.50 for naive/reactive policies, demonstrating that shallow heuristics are insufficient.
 - blackout shows a large gap between greedy and phase-aware reasoning due to thundering-herd dynamics and burn-budget pressure.
+- In blackout, `0.331` (reasoning) vs `0.040` (greedy) is an ~8.3x gap, direct evidence that phase-aware planning outperforms reactive heuristics.
 
 ## RL evidence baseline
 
@@ -284,7 +321,25 @@ The script prints a CSV table (`task,noop,greedy,reasoning`) across fixed seeds.
 
 ### Delayed-credit example
 
-In `longhaul`, the environment enters a `silent-leak` phase before major traffic pressure. A policy that scales `inference` early when memory creep is visible takes an immediate cost hit but prevents a later crash during surge. The positive return from that action appears many steps later, which is exactly the delayed credit-assignment pattern RL should solve.
+Concrete walkthrough from `longhaul`:
+
+1. Step 6 (`silent-leak`): `inference.memory_utilization` is 78% and still climbing; queue is stable, so scaling now looks "unnecessary".
+2. Step 6 action: policy chooses `scale_service(inference, +1)`. Immediate effect is higher cost and slight short-term reward drop.
+3. Steps 7-14: memory creep continues; no immediate payoff yet.
+4. Step 16 (`surge` transition): traffic jumps; without step-6 scale, inference saturates and triggers node-failure/cascade risk.
+5. Steps 16-20: with proactive scale, latency and SLA breaches stay materially lower and outage is avoided.
+
+The reward impact appears roughly 10 steps after the action, which is exactly the delayed credit-assignment behavior RL is meant to capture.
+
+### Why blackout defeats greedy control
+
+`blackout` is designed so greedy/reactive policies fail for opposite reasons:
+
+1. Under-scale path: waiting for latency to spike before scaling lets DB lock contention form during `thundering-herd`, causing cascading SLA failures.
+2. Over-scale path: aggressive immediate scale-up protects latency but rapidly exhausts burn-budget and cost constraints, triggering heavy penalties.
+3. Winning path: phase-aware scaling that uses traffic rate-of-change, not just current latency, while preserving budget headroom for later outage waves.
+
+This is why greedy can collapse to `0.040` while a reasoning policy reaches `0.331` on the same task family.
 
 ## Deployment
 

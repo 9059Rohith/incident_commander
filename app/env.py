@@ -503,6 +503,8 @@ class IncidentCommanderEnv:
 
             if self.task.task_id == "longhaul" and name == "inference" and self.phase == "silent-leak":
                 service.memory_utilization = float(np.clip(service.memory_utilization + 100.0 * self.task.memory_leak_rate, 10.0, 100.0))
+                # Keep silent-leak progression deterministic so the delayed-credit pattern is auditable.
+                service.memory_utilization = float(max(service.memory_utilization, 72.0 + float(self.timestep)))
 
             if service.memory_utilization > 96.0 and service.healthy:
                 service.healthy = False
@@ -515,6 +517,7 @@ class IncidentCommanderEnv:
             latency_values.append(service.p95_latency)
 
         self._apply_dependency_hell()
+        self._apply_longhaul_failure_window()
         self._apply_thundering_herd_rules(traffic_profile)
 
         uptime_ratio = 1.0 if demand_total <= 0 else served_total / demand_total
@@ -572,6 +575,20 @@ class IncidentCommanderEnv:
 
         if self.phase == "thundering-herd" and inference.instances >= 8:
             self.cumulative_cost += 0.08
+
+    def _apply_longhaul_failure_window(self) -> None:
+        if self.task.task_id != "longhaul" or self.phase != "surge":
+            return
+
+        inference = self.services["inference"]
+        # If inference is still underscaled when surge begins after leak accumulation,
+        # force node-failure pressure that proactive scaling would have avoided.
+        if inference.instances <= 4 and inference.memory_utilization >= 88.0:
+            self._emit_incident_once("inference", "node_failure", "critical")
+            inference.p95_latency = round(float(np.clip(inference.p95_latency * 1.35, 20.0, 1000.0)), 2)
+            inference.error_rate = round(float(np.clip(inference.error_rate + 0.22, 0.0, 1.0)), 4)
+            inference.healthy = False
+            inference.last_action_result = "surge collapse after silent leak"
 
     def _emit_incident_once(self, service: str, incident_type: str, severity: str) -> None:
         for incident in self.active_incidents:
