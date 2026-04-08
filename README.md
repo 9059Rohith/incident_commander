@@ -27,6 +27,8 @@ short_description: LLM incident response benchmark for AI platforms
 [![Docker](https://img.shields.io/badge/docker-required-informational)](https://www.docker.com/)
 [![CPU Only](https://img.shields.io/badge/GPU-not%20required-success)](https://meta-pytorch.org/OpenEnv/)
 
+Quick links: [Judge Guide](JUDGES_GUIDE.md) | [Submission Brief](HACKATHON_SUBMISSION_BRIEF.md) | [Pre-Submission Checklist](PRE_SUBMISSION_CHECKLIST.md)
+
 ---
 
 ## Why this project matters
@@ -276,7 +278,15 @@ python -m uvicorn app.main:app --host 0.0.0.0 --port 7860
 bash scripts/validate-submission.sh https://your-space.hf.space .
 ```
 
+PowerShell (Windows):
+
+```powershell
+./scripts/validate-submission.ps1 -PingUrl "https://your-space.hf.space" -RepoDir "."
+```
+
 The validator checks the live Space, Docker build, and OpenEnv validation.
+
+Use the Space app URL (`https://<space-subdomain>.hf.space`) as the ping URL, not the `huggingface.co/spaces/...` page URL.
 
 For local API smoke testing (run server first):
 
@@ -287,8 +297,21 @@ python scripts/test-local.py
 You can also run OpenEnv validation directly from the repo root:
 
 ```bash
-openenv validate
+python -m openenv.cli validate
 ```
+
+## Judge quickstart (2 minutes)
+
+1. Open `https://<space-subdomain>.hf.space/health` and verify `status=ok`.
+2. POST `https://<space-subdomain>.hf.space/reset` and verify HTTP 200.
+3. GET `https://<space-subdomain>.hf.space/tasks` and confirm task ids are `easy, medium, hard, longhaul, blackout`.
+4. Run:
+
+```bash
+python -m openenv.cli validate
+```
+
+5. Optionally run the one-command validator script from this repo.
 
 ## Inference
 
@@ -385,6 +408,8 @@ The repo includes a Dockerfile and OpenEnv manifest for Hugging Face Spaces depl
 - `inference.py` runs from the repo root
 - 5 tasks are available through `/tasks`
 - `/reset`, `/step`, `/state`, `/grade`, `/metrics`, and `/visualize` are implemented
+
+For a complete final pass, use `PRE_SUBMISSION_CHECKLIST.md`.
 
 ---
 

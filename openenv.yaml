@@ -27,6 +27,11 @@ endpoints:
   state: /state
   grade: /grade
   tasks: /tasks
+  visualize: /visualize
+  metrics: /metrics
+  baseline: /baseline
+  report: /report
+  benchmark_matrix: /benchmark_matrix
 tags:
   - openenv
   - reinforcement-learning
