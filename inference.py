@@ -32,7 +32,7 @@ BENCHMARK = "incident-commander"
 SYSTEM_PROMPT = (
     "You are an incident commander for a microservices outage. "
     "Return only strict JSON with keys action_type, target_service, delta_instances, fallback_service, config_key, config_value, n_lines, question, note. "
-    "Valid action_type values are get_metrics, list_processes, read_last_n_logs, check_network_connectivity, restart_service, rollback_deployment, "
+    "Valid action_type values are get_metrics, list_processes, read_last_n_logs, check_network_connectivity, failover_database, restart_service, rollback_deployment, "
     "scale_up_replicas, edit_config_line, run_healthcheck, ask_developer, load_test, run_command, noop."
 )
 
@@ -87,6 +87,12 @@ def _heuristic_action(obs: Dict[str, Any]) -> Dict[str, Any]:
 
     symptom_blob = " ".join(str(s) for s in symptoms).lower()
     terminal_blob = " ".join(str(s) for s in terminal_output).lower()
+
+    if "packet loss" in terminal_blob or "replication lag" in terminal_blob:
+        return {
+            "action_type": "failover_database",
+            "note": "stabilize db via regional failover",
+        }
 
     if "frontend" in symptom_blob and "auth" not in terminal_blob:
         return {

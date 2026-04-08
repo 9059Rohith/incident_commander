@@ -16,9 +16,9 @@ envs: Dict[str, IncidentCommanderEnv] = {}
 TASK_DESCRIPTIONS = {
     "easy": "Trace frontend failures to root cause and restore service health",
     "medium": "Investigate dependency failures across frontend/auth/db under pressure",
-    "hard": "Recover from config drift and high-load race conditions with verification",
-    "longhaul": "Handle mixed outages with black-box telemetry and budget-aware remediation",
-    "blackout": "Survive thundering-herd outages with safe, efficient SRE operations",
+    "hard": "Recover from config drift, regional network issues, and high-load race conditions with verification",
+    "longhaul": "Handle mixed outages (including cross-zone packet loss) with black-box telemetry and budget-aware remediation",
+    "blackout": "Survive thundering-herd outages with safe, efficient SRE operations and resilient multi-region recovery",
 }
 
 
@@ -31,6 +31,10 @@ def _get_env(task_id: str) -> IncidentCommanderEnv:
 def _baseline_action(observation: dict) -> IncidentCommanderAction:
     services = observation.get("services", {})
     frontend = services.get("frontend", {})
+    terminal_output = " ".join(observation.get("terminal_output", []))
+
+    if "packet loss" in terminal_output.lower() or "replication lag" in terminal_output.lower():
+        return IncidentCommanderAction(action_type="failover_database", note="baseline failover")
 
     if float(frontend.get("observed_error_rate", frontend.get("error_rate", 0.0)) or 0.0) > 0.35:
         return IncidentCommanderAction(action_type="read_last_n_logs", target_service="auth", n_lines=30, note="baseline triage auth logs")
@@ -142,6 +146,27 @@ async def metrics(task_id: str = "easy", include_trace: bool = True):
     return payload
 
 
+@app.get("/report")
+async def report(task_id: str = "easy"):
+    env = _get_env(task_id)
+    metrics_payload = env.get_metrics()
+    episode_result = env.build_episode_result()
+    grade_score = float(GRADERS[task_id](episode_result))
+    top_risks = [incident.model_dump() for incident in env.active_incidents if not incident.resolved][:5]
+    return {
+        "task_id": task_id,
+        "grade_score": round(grade_score, 6),
+        "episode_result": episode_result.model_dump(),
+        "metrics": metrics_payload,
+        "top_unresolved_incidents": top_risks,
+        "decision_summary": {
+            "scenario": env.scenario.scenario_id,
+            "resilience_score": metrics_payload.get("resilience_score", 0.0),
+            "recommended_focus": "investigate->stabilize->verify",
+        },
+    }
+
+
 @app.get("/visualize")
 async def visualize(task_id: str = "easy"):
     env = _get_env(task_id)
@@ -185,6 +210,31 @@ async def baseline(task_id: str = "easy", episodes: int = 5):
                 break
         scores.append(GRADERS[task_id](env.build_episode_result()))
     return {"task_id": task_id, "episodes": episodes, "avg_score": round(float(np.mean(scores)), 3), "scores": [round(float(s), 3) for s in scores]}
+
+
+@app.get("/benchmark_matrix")
+async def benchmark_matrix(episodes: int = 3):
+    episodes = int(np.clip(episodes, 1, 10))
+    results = {}
+    for task_id in TASKS:
+        scores = []
+        for index in range(episodes):
+            seed = 101 + index
+            env = IncidentCommanderEnv(TASKS[task_id], seed=seed)
+            obs = env.reset(seed=seed)
+            while not env.done:
+                action = _baseline_action(obs.model_dump())
+                obs, _, done, _ = env.step(action)
+                if done:
+                    break
+            scores.append(float(GRADERS[task_id](env.build_episode_result())))
+        results[task_id] = {
+            "avg": round(float(np.mean(scores)), 4),
+            "min": round(float(np.min(scores)), 4),
+            "max": round(float(np.max(scores)), 4),
+            "scores": [round(float(v), 4) for v in scores],
+        }
+    return {"episodes": episodes, "matrix": results}
 
 
 if __name__ == "__main__":

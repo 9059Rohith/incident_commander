@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Dict, List, Literal, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class ServiceState(BaseModel):
@@ -26,7 +26,7 @@ class ServiceState(BaseModel):
     observed_error_rate: Optional[float] = None
     metric_staleness_steps: int = 0
     last_action_result: str = "idle"
-    reachable_upstreams: List[str] = []
+    reachable_upstreams: List[str] = Field(default_factory=list)
 
 
 class ActiveIncident(BaseModel):
@@ -47,12 +47,15 @@ class ActiveIncident(BaseModel):
 
 
 class ScenarioState(BaseModel):
-    scenario_id: Literal["resource_exhaustion", "config_drift", "heisenbug"]
+    scenario_id: Literal["resource_exhaustion", "config_drift", "heisenbug", "regional_outage"]
     noisy_neighbor_io: float = 0.0
     db_port_expected: int = 5432
     db_port_actual: int = 5432
     heisenbug_armed: bool = False
     heisenbug_triggered: bool = False
+    cross_zone_packet_loss: float = 0.0
+    db_primary_zone: str = "zone-a"
+    db_failover_complete: bool = False
 
 
 class IncidentCommanderObservation(BaseModel):
@@ -67,11 +70,11 @@ class IncidentCommanderObservation(BaseModel):
     cost_per_step: float
     last_action_result: str
     phase: str
-    symptoms: List[str] = []
-    terminal_output: List[str] = []
-    investigation_log: List[str] = []
-    live_timeline: List[str] = []
-    available_actions: List[str] = []
+    symptoms: List[str] = Field(default_factory=list)
+    terminal_output: List[str] = Field(default_factory=list)
+    investigation_log: List[str] = Field(default_factory=list)
+    live_timeline: List[str] = Field(default_factory=list)
+    available_actions: List[str] = Field(default_factory=list)
     scenario_hint: Optional[str] = None
 
 
@@ -81,6 +84,7 @@ class IncidentCommanderAction(BaseModel):
         "list_processes",
         "read_last_n_logs",
         "check_network_connectivity",
+        "failover_database",
         "restart_service",
         "rollback_deployment",
         "scale_up_replicas",
@@ -138,7 +142,7 @@ class TaskConfig(BaseModel):
     spot_disruption_chance: float = 0.0
     memory_leak_rate: float = 0.0
     thundering_herd: bool = False
-    scenario_mix: List[Literal["resource_exhaustion", "config_drift", "heisenbug"]] = ["resource_exhaustion"]
+    scenario_mix: List[Literal["resource_exhaustion", "config_drift", "heisenbug", "regional_outage"]] = Field(default_factory=lambda: ["resource_exhaustion"])
 
 
 class EpisodeResult(BaseModel):

@@ -31,7 +31,7 @@ short_description: LLM incident response benchmark for AI platforms
 
 ## Why this project matters
 
-AI platforms fail in very specific ways: deploys regress, traffic spikes overwhelm inference, database stalls cascade into API latency, and on-call engineers must decide whether to scale, rollback, reroute, quarantine, or escalate. Incident Commander OpenEnv turns that operational reality into a high-signal RL benchmark.
+AI platforms fail in very specific ways: deploys regress, traffic spikes overwhelm auth dependencies, database stalls cascade into frontend latency, and on-call engineers must decide whether to scale, rollback, reroute, quarantine, or escalate. Incident Commander OpenEnv turns that operational reality into a high-signal RL benchmark.
 
 The agent does not optimize a toy score. It makes constrained, sequential decisions under partial observability and delayed consequences, with the same reliability-versus-cost trade-offs used in production SRE work.
 
@@ -76,6 +76,9 @@ A purely reactive prompt policy can look competent on simple episodes but fails 
 - Added a professional SRE toolbelt action space (exploration, remediation, verification, human collaboration).
 - Added an ephemeral filesystem model where `/tmp` and runtime config are reset every episode.
 - Added live incident timeline output in `/metrics` for step-by-step auditability.
+- Added a multi-region failure mode (`regional_outage`) with cross-zone packet loss and replication lag.
+- Added explicit `failover_database` action for resilient, production-style disaster recovery.
+- Added judge-friendly endpoints `/report` and `/benchmark_matrix` for quick comparative evaluation.
 
 ---
 
@@ -113,7 +116,7 @@ The agent receives a terminal-like snapshot with noisy telemetry and user-visibl
 
 ### Task 3: hard (50 steps)
 
-- Objective: stop a cascading failure across API, inference, and database services.
+- Objective: stop a cascading failure across frontend, auth, and db services.
 - What it tests: coordinated incident response and prioritization.
 
 ### Task 4: longhaul (60 steps)
@@ -163,6 +166,7 @@ The agent can take one of the following actions:
 | `list_processes` | Inspect service process/worker state |
 | `read_last_n_logs` | Inspect service logs to trace failures |
 | `check_network_connectivity` | Probe service-to-service network paths |
+| `failover_database` | Promote DB replica across zones during regional packet-loss incidents |
 | `restart_service` | Restart a service instance pool |
 | `rollback_deployment` | Roll back a service to a safe release |
 | `scale_up_replicas` | Add replicas to recover capacity |
@@ -177,7 +181,7 @@ The agent can take one of the following actions:
 
 ```python
 class IncidentCommanderAction(BaseModel):
-  action_type: Literal["get_metrics", "list_processes", "read_last_n_logs", "check_network_connectivity", "restart_service", "rollback_deployment", "scale_up_replicas", "edit_config_line", "run_healthcheck", "ask_developer", "load_test", "run_command", "noop"]
+  action_type: Literal["get_metrics", "list_processes", "read_last_n_logs", "check_network_connectivity", "failover_database", "restart_service", "rollback_deployment", "scale_up_replicas", "edit_config_line", "run_healthcheck", "ask_developer", "load_test", "run_command", "noop"]
     target_service: Optional[str] = None
     delta_instances: int = 0
     fallback_service: Optional[str] = None
@@ -222,7 +226,7 @@ The MTTR and anti-panic terms are intentional differentiators: they reward fast,
 The environment includes explicit controls to reduce reward hacking and brittle policies:
 
 - Unforced escalation penalty: paging human intervention without active high/critical pressure is penalized.
-- Passive-loop penalty: repeated `noop`/`page_human` streaks receive an additional penalty.
+- Passive-loop penalty: repeated `noop`/`ask_developer` streaks receive an additional penalty.
 - Budget failure boundary: episodes terminate early if cumulative operating cost exceeds a hard budget multiplier.
 
 These safeguards make high scores correlate with operationally meaningful behavior instead of trivial exploit patterns.
@@ -252,6 +256,8 @@ The grader favors uptime, latency, SLA protection, cost discipline, incident rec
 - GET `/visualize?task_id={easy|medium|hard|longhaul|blackout}`
 - GET `/baseline?task_id={easy|medium|hard|longhaul|blackout}&episodes=5`
 - GET `/metrics?task_id={easy|medium|hard|longhaul|blackout}`
+- GET `/report?task_id={easy|medium|hard|longhaul|blackout}`
+- GET `/benchmark_matrix?episodes=3`
 
 `/metrics` supports `include_trace=true|false` and returns both aggregate scores and per-step reward breakdown.
 
@@ -348,14 +354,14 @@ The script prints a CSV table (`task,noop,greedy,reasoning`) across fixed seeds.
 
 Concrete walkthrough from `longhaul`:
 
-1. Step 6 (`silent-leak`): `inference.memory_utilization` is 78% and still climbing; queue is stable, so scaling now looks "unnecessary".
-2. Step 6 action: policy chooses `scale_service(inference, +1)`. Immediate effect is higher cost and slight short-term reward drop.
+1. Step 6 (`slow-burn`): `db.memory_utilization` is 78% and still climbing; queue is stable, so scaling now looks "unnecessary".
+2. Step 6 action: policy chooses `scale_up_replicas(db, +1)`. Immediate effect is higher cost and slight short-term reward drop.
 3. Steps 7-14: memory creep continues; no immediate payoff yet.
-4. Step 16 (`surge` transition): traffic jumps; without step-6 scale, inference saturates and triggers node-failure/cascade risk.
+4. Step 16 (`surge` transition): traffic jumps; without step-6 scale, db saturates and triggers auth/frontend cascade risk.
 5. Steps 16-20: with proactive scale, latency and SLA breaches stay materially lower and outage is avoided.
 
 The reward impact appears roughly 10 steps after the action, which is exactly the delayed credit-assignment behavior RL is meant to capture.
-The reward for the `scale_service` action taken at step 6 only materialized at steps 16-20. That 10-step gap is the credit assignment problem: no rule bridges it, only learned experience can.
+The reward for the `scale_up_replicas` action taken at step 6 only materialized at steps 16-20. That 10-step gap is the credit assignment problem: no rule bridges it, only learned experience can.
 
 ### Why blackout defeats greedy control
 

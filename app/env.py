@@ -50,7 +50,7 @@ TASKS: Dict[str, TaskConfig] = {
         cost_budget=0.72,
         max_sla_breaches=8,
         observation_noise=0.08,
-        scenario_mix=["config_drift", "heisenbug"],
+        scenario_mix=["config_drift", "heisenbug", "regional_outage"],
     ),
     "longhaul": TaskConfig(
         task_id="longhaul",
@@ -61,7 +61,7 @@ TASKS: Dict[str, TaskConfig] = {
         cost_budget=0.8,
         max_sla_breaches=8,
         observation_noise=0.1,
-        scenario_mix=["resource_exhaustion", "config_drift", "heisenbug"],
+        scenario_mix=["resource_exhaustion", "config_drift", "heisenbug", "regional_outage"],
     ),
     "blackout": TaskConfig(
         task_id="blackout",
@@ -73,7 +73,7 @@ TASKS: Dict[str, TaskConfig] = {
         max_sla_breaches=7,
         observation_noise=0.14,
         thundering_herd=True,
-        scenario_mix=["resource_exhaustion", "config_drift", "heisenbug"],
+        scenario_mix=["resource_exhaustion", "config_drift", "heisenbug", "regional_outage"],
     ),
 }
 
@@ -388,6 +388,16 @@ class IncidentCommanderEnv:
             self._append_timeline(f"Agent ran network check {source}->{dest}")
             return output, "check_network_connectivity", False
 
+        if mapped.action_type == "failover_database":
+            if self.scenario.scenario_id != "regional_outage":
+                return "failover skipped: primary region healthy", "failover_database", True
+            self.scenario.db_primary_zone = "zone-b"
+            self.scenario.db_failover_complete = True
+            self.scenario.cross_zone_packet_loss = max(0.0, self.scenario.cross_zone_packet_loss - 0.75)
+            self._resolve_root_cause("regional_outage")
+            self._append_timeline("Agent executed cross-zone database failover")
+            return "db failover complete zone-a->zone-b", "failover_database", False
+
         if mapped.action_type == "run_healthcheck":
             target = mapped.target_service
             ok = self._healthcheck(target)
@@ -501,6 +511,9 @@ class IncidentCommanderEnv:
             if self._effective_traffic_level() > self.task.base_traffic * 1.6:
                 self.scenario.heisenbug_triggered = True
 
+        if self.scenario.scenario_id == "regional_outage" and not self.scenario.db_failover_complete:
+            self.scenario.cross_zone_packet_loss = float(np.clip(self.scenario.cross_zone_packet_loss + 0.03, 0.0, 0.98))
+
     def _current_traffic_profile(self) -> float:
         if self.task.task_id == "easy":
             self.phase = "investigation"
@@ -534,6 +547,8 @@ class IncidentCommanderEnv:
             db_penalty += 0.35 * self.scenario.noisy_neighbor_io
         if self.scenario.scenario_id == "config_drift" and self.scenario.db_port_actual != self.scenario.db_port_expected:
             db_penalty += 0.6
+        if self.scenario.scenario_id == "regional_outage" and not self.scenario.db_failover_complete:
+            db_penalty += 0.55 * self.scenario.cross_zone_packet_loss
 
         for name, svc in self.services.items():
             pressure = 1.0
@@ -587,6 +602,8 @@ class IncidentCommanderEnv:
         frontend = self.services["frontend"]
 
         db_connection_ok = db.healthy and self.scenario.db_port_actual == self.scenario.db_port_expected
+        if self.scenario.scenario_id == "regional_outage" and not self.scenario.db_failover_complete:
+            db_connection_ok = db_connection_ok and self.scenario.cross_zone_packet_loss < 0.35
 
         if not db_connection_ok:
             auth.healthy = False
@@ -689,6 +706,8 @@ class IncidentCommanderEnv:
         if service == "db":
             if self.scenario.noisy_neighbor_io > 0.4:
                 return f"[{n_lines} lines] db io wait above threshold noisy-neighbor detected"
+            if self.scenario.scenario_id == "regional_outage" and not self.scenario.db_failover_complete:
+                return f"[{n_lines} lines] db replication lag high in {self.scenario.db_primary_zone}; cross-zone packet loss={self.scenario.cross_zone_packet_loss:.2f}"
             if self.scenario.db_port_actual != self.scenario.db_port_expected:
                 return f"[{n_lines} lines] db listening on {self.scenario.db_port_expected}; clients using wrong port"
             return f"[{n_lines} lines] db stable"
@@ -703,6 +722,8 @@ class IncidentCommanderEnv:
             return "We pushed an auth config update 10 minutes ago. Might have changed DB connection settings."
         if self.scenario.scenario_id == "heisenbug":
             return "Auth started flaking only during traffic spikes after the latest deployment."
+        if self.scenario.scenario_id == "regional_outage":
+            return "Cross-zone packet loss is spiking. Failing over DB primary might stabilize auth latency."
         return "Infra reported a noisy-neighbor process saturating disk IO on the DB node."
 
     def _resolve_root_cause(self, scenario_id: str) -> None:
@@ -717,6 +738,9 @@ class IncidentCommanderEnv:
         if scenario_id == "heisenbug":
             self.scenario.heisenbug_triggered = False
             self.scenario.heisenbug_armed = False
+        if scenario_id == "regional_outage":
+            self.scenario.cross_zone_packet_loss = 0.0
+            self.scenario.db_failover_complete = True
 
     def _select_scenario(self) -> str:
         choices = self.task.scenario_mix or ["resource_exhaustion"]
@@ -728,6 +752,15 @@ class IncidentCommanderEnv:
             return ScenarioState(scenario_id="resource_exhaustion", noisy_neighbor_io=0.45)
         if scenario_id == "config_drift":
             return ScenarioState(scenario_id="config_drift", db_port_expected=5432, db_port_actual=15432)
+        if scenario_id == "regional_outage":
+            return ScenarioState(
+                scenario_id="regional_outage",
+                db_port_expected=5432,
+                db_port_actual=5432,
+                cross_zone_packet_loss=0.42,
+                db_primary_zone="zone-a",
+                db_failover_complete=False,
+            )
         return ScenarioState(scenario_id="heisenbug", heisenbug_armed=False, heisenbug_triggered=False)
 
     def _apply_scenario_bootstrap(self) -> None:
@@ -736,6 +769,8 @@ class IncidentCommanderEnv:
             self.config_runtime = dict(self.config_broken)
         if self.scenario.scenario_id == "heisenbug":
             self.services["auth"].version = "v1-buggy"
+        if self.scenario.scenario_id == "regional_outage":
+            self.services["db"].last_action_result = "cross-zone packet loss detected on primary"
 
     def _append_timeline(self, message: str) -> None:
         timestamp = f"12:00:{self.timestep:02d}"
@@ -806,6 +841,7 @@ class IncidentCommanderEnv:
             "list_processes",
             "read_last_n_logs",
             "check_network_connectivity",
+            "failover_database",
             "restart_service",
             "rollback_deployment",
             "scale_up_replicas",
@@ -875,6 +911,7 @@ class IncidentCommanderEnv:
         root_cause_identification_rate = max(0.0, min(1.0, len(self.investigation_targets) / 3.0))
         safe_ops_score = max(0.0, min(1.0, 1.0 - (self.unsafe_actions / action_total)))
         verification_score = max(0.0, min(1.0, self.verification_successes / max(1, self.action_counts["run_healthcheck"])))
+        resilience_score = max(0.0, min(1.0, (0.5 * uptime_score) + (0.3 * safe_ops_score) + (0.2 * verification_score)))
 
         return {
             "uptime_score": round(uptime_score, 6),
@@ -887,6 +924,7 @@ class IncidentCommanderEnv:
             "root_cause_identification_rate": round(root_cause_identification_rate, 6),
             "safe_ops_score": round(safe_ops_score, 6),
             "verification_score": round(verification_score, 6),
+            "resilience_score": round(resilience_score, 6),
             "burn_budget_ratio": round(self.downtime_used / max(1e-6, self.burn_budget_total), 6),
             "timeline": self.live_timeline,
             "reward_trace": self.reward_trace,
