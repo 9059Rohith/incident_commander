@@ -56,3 +56,32 @@ def test_health_endpoint_reports_runtime_metadata() -> None:
     assert payload["status"] == "ok"
     assert isinstance(payload.get("supported_tasks"), list)
     assert "easy" in payload["supported_tasks"]
+
+
+def test_replay_endpoint_is_deterministic_for_same_seed() -> None:
+    client = TestClient(app)
+    first = client.get("/replay", params={"task_id": "easy", "seed": 123, "policy": "baseline"})
+    second = client.get("/replay", params={"task_id": "easy", "seed": 123, "policy": "baseline"})
+    first.raise_for_status()
+    second.raise_for_status()
+
+    payload_a = first.json()
+    payload_b = second.json()
+    assert payload_a["score"] == payload_b["score"]
+    assert payload_a["failure_taxonomy"] == payload_b["failure_taxonomy"]
+    assert payload_a["incident_narrative"]["step_count"] == payload_b["incident_narrative"]["step_count"]
+
+
+def test_evaluation_report_endpoint_returns_summary() -> None:
+    client = TestClient(app)
+    response = client.get(
+        "/evaluation_report",
+        params={"policy": "baseline", "episodes_per_task": 2, "seed_start": 42},
+    )
+    response.raise_for_status()
+    payload = response.json()
+    assert payload["policy"] == "baseline"
+    assert payload["episodes_per_task"] == 2
+    assert "summary" in payload
+    assert "per_task" in payload
+    assert "easy" in payload["per_task"]

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from statistics import mean, pstdev
 from typing import Dict
 
 import numpy as np
@@ -20,6 +21,8 @@ TASK_DESCRIPTIONS = {
     "longhaul": "Handle mixed outages (including cross-zone packet loss) with black-box telemetry and budget-aware remediation",
     "blackout": "Survive thundering-herd outages with safe, efficient SRE operations and resilient multi-region recovery",
 }
+
+SUPPORTED_REPLAY_POLICIES = ["baseline", "noop", "reasoning"]
 
 
 def _get_env(task_id: str) -> IncidentCommanderEnv:
@@ -68,6 +71,113 @@ def _baseline_action(observation: dict) -> IncidentCommanderAction:
         return IncidentCommanderAction(action_type="run_healthcheck", target_service="frontend", note="baseline verify")
 
     return IncidentCommanderAction(action_type="noop", note="baseline noop")
+
+
+def _noop_action(_: dict) -> IncidentCommanderAction:
+    return IncidentCommanderAction(action_type="noop", note="replay-noop")
+
+
+def _reasoning_action(observation: dict) -> IncidentCommanderAction:
+    terminal_output = " ".join(observation.get("terminal_output", []))
+    terminal_lower = terminal_output.lower()
+    services = observation.get("services", {})
+    frontend = services.get("frontend", {})
+    auth = services.get("auth", {})
+    db = services.get("db", {})
+    step = int(observation.get("step", 0) or 0)
+
+    if step < 2:
+        return IncidentCommanderAction(action_type="get_metrics", target_service="frontend", note="reasoning initial triage")
+
+    if "wrong port" in terminal_lower or "connection refused" in terminal_lower:
+        return IncidentCommanderAction(
+            action_type="edit_config_line",
+            config_key="db_port",
+            config_value="5432",
+            note="reasoning fix config drift",
+        )
+
+    if "packet loss" in terminal_lower or "replication lag" in terminal_lower:
+        return IncidentCommanderAction(action_type="failover_database", note="reasoning regional failover")
+
+    if "race condition" in terminal_lower:
+        return IncidentCommanderAction(action_type="rollback_deployment", target_service="auth", note="reasoning rollback")
+
+    if float(auth.get("error_rate", 0.0) or 0.0) > 0.35:
+        return IncidentCommanderAction(action_type="read_last_n_logs", target_service="auth", n_lines=35, note="reasoning inspect auth logs")
+
+    if float(db.get("error_rate", 0.0) or 0.0) > 0.25:
+        return IncidentCommanderAction(action_type="scale_up_replicas", target_service="db", delta_instances=1, note="reasoning db headroom")
+
+    if float(observation.get("p95_latency", 0.0) or 0.0) > 280.0:
+        return IncidentCommanderAction(action_type="scale_up_replicas", target_service="frontend", delta_instances=1, note="reasoning frontend scale")
+
+    if float(observation.get("traffic_level", 0.0) or 0.0) > 1.7 and float(frontend.get("healthy", True)):
+        return IncidentCommanderAction(action_type="run_healthcheck", target_service="frontend", note="reasoning verify under traffic")
+
+    return IncidentCommanderAction(action_type="noop", note="reasoning wait")
+
+
+def _policy_action(policy: str, observation: dict) -> IncidentCommanderAction:
+    if policy == "noop":
+        return _noop_action(observation)
+    if policy == "reasoning":
+        return _reasoning_action(observation)
+    return _baseline_action(observation)
+
+
+def _extract_failure_taxonomy(episode_details: dict, final_score: float) -> Dict[str, bool]:
+    return {
+        "sla_failure": bool(episode_details.get("ended_by_sla_failure", False)),
+        "budget_failure": bool(episode_details.get("ended_by_budget_failure", False)),
+        "low_score_failure": final_score < 0.5,
+    }
+
+
+def _rollout_episode(task_id: str, seed: int, policy: str, max_steps: int | None = None) -> Dict[str, object]:
+    env = IncidentCommanderEnv(TASKS[task_id], seed=seed)
+    observation = env.reset(seed=seed)
+    step_limit = env.task.max_steps if max_steps is None else int(np.clip(max_steps, 1, env.task.max_steps))
+    steps = []
+
+    while not env.done and env.timestep < step_limit:
+        action = _policy_action(policy, observation.model_dump())
+        before_state = env.get_state()
+        next_observation, reward, done, info = env.step(action)
+        after_state = env.get_state()
+
+        steps.append(
+            {
+                "step": int(before_state.get("step", 0)),
+                "phase": str(next_observation.phase),
+                "action": action.model_dump(),
+                "reward": reward.model_dump(),
+                "done": bool(done),
+                "info": info,
+                "state_before": before_state,
+                "state_after": after_state,
+                "observation": next_observation.model_dump(),
+            }
+        )
+        observation = next_observation
+
+    episode_result = env.build_episode_result()
+    score = float(GRADERS[task_id](episode_result))
+    details = episode_result.model_dump()
+    metrics_payload = env.get_metrics()
+    failure_taxonomy = _extract_failure_taxonomy(details, score)
+
+    return {
+        "task_id": task_id,
+        "seed": seed,
+        "policy": policy,
+        "steps": steps,
+        "score": round(score, 6),
+        "episode_details": details,
+        "metrics": metrics_payload,
+        "failure_taxonomy": failure_taxonomy,
+        "timeline": list(metrics_payload.get("timeline", [])),
+    }
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -259,6 +369,104 @@ async def benchmark_matrix(episodes: int = 3):
             "scores": [round(float(v), 4) for v in scores],
         }
     return {"episodes": episodes, "matrix": results}
+
+
+@app.get("/replay")
+async def replay(task_id: str = "easy", seed: int = 42, policy: str = "baseline", max_steps: int | None = None):
+    if task_id not in TASKS:
+        raise HTTPException(status_code=400, detail="Unknown task_id")
+    if policy not in SUPPORTED_REPLAY_POLICIES:
+        raise HTTPException(status_code=400, detail=f"Unsupported policy. Use one of {SUPPORTED_REPLAY_POLICIES}")
+
+    payload = _rollout_episode(task_id=task_id, seed=int(seed), policy=policy, max_steps=max_steps)
+    timeline = payload.get("timeline", [])
+    tail = timeline[-6:] if isinstance(timeline, list) else []
+    payload["incident_narrative"] = {
+        "summary": (
+            f"Policy '{policy}' completed task '{task_id}' with score {payload['score']:.3f}. "
+            f"SLA failure={payload['failure_taxonomy']['sla_failure']}, budget failure={payload['failure_taxonomy']['budget_failure']}."
+        ),
+        "timeline_tail": tail,
+        "step_count": len(payload.get("steps", [])),
+    }
+    return payload
+
+
+@app.get("/evaluation_report")
+async def evaluation_report(policy: str = "baseline", episodes_per_task: int = 3, seed_start: int = 42):
+    if policy not in SUPPORTED_REPLAY_POLICIES:
+        raise HTTPException(status_code=400, detail=f"Unsupported policy. Use one of {SUPPORTED_REPLAY_POLICIES}")
+
+    episodes_per_task = int(np.clip(episodes_per_task, 1, 10))
+    seed_start = int(seed_start)
+    per_task = {}
+    all_scores = []
+    failure_totals = {
+        "sla_failure": 0,
+        "budget_failure": 0,
+        "low_score_failure": 0,
+    }
+
+    for task_id in TASKS:
+        task_scores = []
+        task_failure_counts = {
+            "sla_failure": 0,
+            "budget_failure": 0,
+            "low_score_failure": 0,
+        }
+        seed_runs = []
+
+        for idx in range(episodes_per_task):
+            seed = seed_start + idx
+            rollout = _rollout_episode(task_id=task_id, seed=seed, policy=policy)
+            score = float(rollout["score"])
+            task_scores.append(score)
+            all_scores.append(score)
+
+            ft = rollout["failure_taxonomy"]
+            for key in task_failure_counts:
+                if ft.get(key, False):
+                    task_failure_counts[key] += 1
+                    failure_totals[key] += 1
+
+            seed_runs.append(
+                {
+                    "seed": seed,
+                    "score": round(score, 6),
+                    "failure_taxonomy": ft,
+                    "step_count": len(rollout.get("steps", [])),
+                }
+            )
+
+        task_avg = mean(task_scores)
+        task_std = pstdev(task_scores) if len(task_scores) > 1 else 0.0
+        robustness = max(0.0, min(1.0, 1.0 - min(1.0, task_std)))
+        per_task[task_id] = {
+            "avg_score": round(task_avg, 6),
+            "min_score": round(min(task_scores), 6),
+            "max_score": round(max(task_scores), 6),
+            "std_dev": round(task_std, 6),
+            "robustness_score": round(robustness, 6),
+            "failure_taxonomy": task_failure_counts,
+            "seed_runs": seed_runs,
+        }
+
+    global_avg = mean(all_scores) if all_scores else 0.0
+    global_std = pstdev(all_scores) if len(all_scores) > 1 else 0.0
+    overall_robustness = max(0.0, min(1.0, 1.0 - min(1.0, global_std)))
+
+    return {
+        "policy": policy,
+        "episodes_per_task": episodes_per_task,
+        "seed_start": seed_start,
+        "summary": {
+            "global_avg_score": round(global_avg, 6),
+            "global_std_dev": round(global_std, 6),
+            "overall_robustness_score": round(overall_robustness, 6),
+        },
+        "failure_taxonomy_totals": failure_totals,
+        "per_task": per_task,
+    }
 
 
 if __name__ == "__main__":

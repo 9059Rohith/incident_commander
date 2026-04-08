@@ -260,8 +260,28 @@ The grader favors uptime, latency, SLA protection, cost discipline, incident rec
 - GET `/metrics?task_id={easy|medium|hard|longhaul|blackout}`
 - GET `/report?task_id={easy|medium|hard|longhaul|blackout}`
 - GET `/benchmark_matrix?episodes=3`
+- GET `/replay?task_id={easy|medium|hard|longhaul|blackout}&seed=42&policy={baseline|noop|reasoning}&max_steps=optional`
+- GET `/evaluation_report?policy={baseline|noop|reasoning}&episodes_per_task=3&seed_start=42`
 
 `/metrics` supports `include_trace=true|false` and returns both aggregate scores and per-step reward breakdown.
+
+`/replay` returns a deterministic full trajectory export (state before/after each step, action, reward decomposition, and incident narrative tail) for a fixed `task_id + seed + policy`.
+
+`/evaluation_report` returns one-call benchmark analytics across all tasks including average score, variance-derived robustness, and failure taxonomy totals.
+
+### Replay export examples
+
+```bash
+curl "http://localhost:7860/replay?task_id=hard&seed=42&policy=baseline"
+curl "http://localhost:7860/replay?task_id=blackout&seed=42&policy=reasoning&max_steps=40"
+```
+
+### One-call evaluation report examples
+
+```bash
+curl "http://localhost:7860/evaluation_report?policy=baseline&episodes_per_task=3&seed_start=42"
+curl "http://localhost:7860/evaluation_report?policy=reasoning&episodes_per_task=5&seed_start=101"
+```
 
 ---
 
