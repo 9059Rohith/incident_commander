@@ -1,6 +1,9 @@
-"""Baseline inference script for Incident Commander OpenEnv.
+"""Inference script for Incident Commander OpenEnv.
 
-Emits strict [START], [STEP], [END] lines.
+Contract requirements:
+- Uses OpenAI client for all LLM calls.
+- Reads API_BASE_URL, MODEL_NAME, HF_TOKEN, and optional LOCAL_IMAGE_NAME.
+- Emits strict [START], [STEP], [END] stdout lines.
 """
 
 from __future__ import annotations
@@ -18,6 +21,8 @@ from models import IncidentCommanderAction
 API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
 MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
 HF_TOKEN = os.getenv("HF_TOKEN")
+# Optional compatibility fallback if runners provide API_KEY instead of HF_TOKEN.
+API_KEY = HF_TOKEN or os.getenv("API_KEY")
 LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
 ENV_URL = os.getenv("ENV_URL", "http://localhost:7860")
 TASKS = ["easy", "medium", "hard", "longhaul", "blackout"]
@@ -30,7 +35,7 @@ SYSTEM_PROMPT = (
     "Valid action_type values are noop, scale_service, reroute_traffic, rollback_deploy, quarantine_service, page_human."
 )
 
-client = OpenAI(api_key=HF_TOKEN or "", base_url=API_BASE_URL)
+client = OpenAI(api_key=API_KEY or "", base_url=API_BASE_URL)
 
 
 def log_start(task: str, env: str, model: str) -> None:
