@@ -85,3 +85,18 @@ def test_evaluation_report_endpoint_returns_summary() -> None:
     assert "summary" in payload
     assert "per_task" in payload
     assert "easy" in payload["per_task"]
+
+
+def test_judge_pack_and_showcase_endpoints_exist() -> None:
+    client = TestClient(app)
+    judge_pack = client.get("/judge_pack")
+    showcase = client.get("/showcase")
+
+    judge_pack.raise_for_status()
+    showcase.raise_for_status()
+
+    payload = judge_pack.json()
+    assert payload["status"] == "submission_ready"
+    assert "/showcase" in payload["core_endpoints"]
+    assert "judge_surface" in payload
+    assert showcase.headers["content-type"].startswith("text/html")

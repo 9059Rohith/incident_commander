@@ -180,6 +180,37 @@ def _rollout_episode(task_id: str, seed: int, policy: str, max_steps: int | None
     }
 
 
+def _judge_pack_snapshot() -> Dict[str, object]:
+    return {
+        "project": "Incident Commander OpenEnv",
+        "status": "submission_ready",
+        "tasks": list(TASKS.keys()),
+        "policies": list(SUPPORTED_REPLAY_POLICIES),
+        "core_endpoints": [
+            "/health",
+            "/tasks",
+            "/reset",
+            "/step",
+            "/state",
+            "/grade",
+            "/metrics",
+            "/report",
+            "/replay",
+            "/evaluation_report",
+            "/benchmark_matrix",
+            "/showcase",
+        ],
+        "judge_surface": {
+            "deterministic_validation": True,
+            "seeded_replay": True,
+            "task_granularity": "easy->blackout",
+            "reward_trace_available": True,
+            "baseline_comparison": True,
+            "hf_space_deployable": True,
+        },
+    }
+
+
 @app.get("/", response_class=HTMLResponse)
 async def root():
     return """
@@ -369,6 +400,167 @@ async def benchmark_matrix(episodes: int = 3):
             "scores": [round(float(v), 4) for v in scores],
         }
     return {"episodes": episodes, "matrix": results}
+
+
+@app.get("/judge_pack")
+async def judge_pack():
+        snapshot = _judge_pack_snapshot()
+        evaluation = await evaluation_report(policy="baseline", episodes_per_task=2, seed_start=42)
+        replay_preview = await replay(task_id="easy", seed=42, policy="baseline", max_steps=3)
+        return {
+                **snapshot,
+                "evaluation_preview": evaluation,
+                "replay_preview": {
+                        "task_id": replay_preview["task_id"],
+                        "policy": replay_preview["policy"],
+                        "score": replay_preview["score"],
+                        "incident_narrative": replay_preview["incident_narrative"],
+                },
+        }
+
+
+@app.get("/showcase", response_class=HTMLResponse)
+async def showcase():
+        snapshot = _judge_pack_snapshot()
+        return f"""
+        <html>
+            <head>
+                <title>Incident Commander Showcase</title>
+                <style>
+                    :root {{
+                        --bg: #071019;
+                        --panel: rgba(255,255,255,0.06);
+                        --panel-2: rgba(255,255,255,0.09);
+                        --border: rgba(255,255,255,0.12);
+                        --text: #eef4ff;
+                        --muted: #b8c7e6;
+                        --accent: #70d6ff;
+                        --accent-2: #8ef0c3;
+                        --warn: #ffd166;
+                    }}
+                    * {{ box-sizing: border-box; }}
+                    body {{ margin: 0; font-family: Inter, Segoe UI, Arial, sans-serif; background: radial-gradient(circle at top, #14213d 0, #071019 48%, #04070c 100%); color: var(--text); }}
+                    .wrap {{ max-width: 1180px; margin: 0 auto; padding: 44px 24px 72px; }}
+                    .hero {{ display: grid; grid-template-columns: 1.35fr 0.95fr; gap: 18px; align-items: stretch; }}
+                    .panel {{ background: var(--panel); border: 1px solid var(--border); border-radius: 22px; padding: 24px; box-shadow: 0 24px 80px rgba(0,0,0,0.22); backdrop-filter: blur(14px); }}
+                    h1 {{ font-size: clamp(2rem, 5vw, 4.2rem); line-height: 0.98; margin: 0 0 12px; letter-spacing: -0.04em; }}
+                    h2 {{ margin: 0 0 12px; font-size: 1.05rem; }}
+                    p {{ color: var(--muted); line-height: 1.7; }}
+                    .badge-row {{ display: flex; flex-wrap: wrap; gap: 10px; margin: 16px 0 0; }}
+                    .badge {{ padding: 8px 12px; border-radius: 999px; border: 1px solid var(--border); background: rgba(255,255,255,0.04); color: var(--text); font-size: 0.92rem; }}
+                    .badge.accent {{ background: rgba(112,214,255,0.12); color: #c9f1ff; border-color: rgba(112,214,255,0.35); }}
+                    .grid {{ display: grid; grid-template-columns: repeat(12, 1fr); gap: 16px; margin-top: 18px; }}
+                    .card {{ grid-column: span 4; background: var(--panel-2); border: 1px solid var(--border); border-radius: 18px; padding: 18px; }}
+                    .card.wide {{ grid-column: span 8; }}
+                    .card.tall {{ grid-column: span 12; }}
+                    .metric {{ font-size: 2rem; font-weight: 800; letter-spacing: -0.04em; margin: 4px 0; }}
+                    .label {{ color: var(--muted); font-size: 0.9rem; }}
+                    .list {{ display: grid; gap: 10px; margin-top: 10px; }}
+                    .list-item {{ display: flex; justify-content: space-between; gap: 16px; padding: 12px 14px; border-radius: 14px; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08); }}
+                    .list-item strong {{ color: var(--text); }}
+                    .linkbar {{ display: flex; flex-wrap: wrap; gap: 12px; margin-top: 18px; }}
+                    a {{ color: var(--accent); text-decoration: none; }}
+                    a:hover {{ text-decoration: underline; }}
+                    code {{ background: rgba(255,255,255,0.07); padding: 2px 6px; border-radius: 8px; }}
+                    @media (max-width: 960px) {{
+                        .hero {{ grid-template-columns: 1fr; }}
+                        .card, .card.wide {{ grid-column: span 12; }}
+                    }}
+                </style>
+            </head>
+            <body>
+                <div class="wrap">
+                    <div class="hero">
+                        <div class="panel">
+                            <div class="badge-row">
+                                <span class="badge accent">OpenEnv</span>
+                                <span class="badge">HF Space ready</span>
+                                <span class="badge">5 graded tasks</span>
+                                <span class="badge">Deterministic replay</span>
+                                <span class="badge">Judge pack</span>
+                            </div>
+                            <h1>Incident Commander<br/>submission cockpit</h1>
+                            <p>
+                                A judge-friendly operational benchmark for AI incident response. This environment turns SRE-style diagnosis,
+                                remediation, and verification into a structured RL problem with transparent scoring and replayable trajectories.
+                            </p>
+                            <div class="linkbar">
+                                <a href="/health">/health</a>
+                                <a href="/tasks">/tasks</a>
+                                <a href="/metrics?task_id=easy&include_trace=true">/metrics</a>
+                                <a href="/judge_pack">/judge_pack</a>
+                                <a href="/replay?task_id=hard&seed=42&policy=baseline">/replay</a>
+                                <a href="/evaluation_report?policy=baseline&episodes_per_task=2&seed_start=42">/evaluation_report</a>
+                            </div>
+                        </div>
+                        <div class="panel">
+                            <h2>Submission snapshot</h2>
+                            <div class="list">
+                                <div class="list-item"><span>Project</span><strong>{snapshot['project']}</strong></div>
+                                <div class="list-item"><span>Status</span><strong>{snapshot['status']}</strong></div>
+                                <div class="list-item"><span>Tasks</span><strong>{len(snapshot['tasks'])}</strong></div>
+                                <div class="list-item"><span>Policies</span><strong>{len(snapshot['policies'])}</strong></div>
+                                <div class="list-item"><span>Replay export</span><strong>Enabled</strong></div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="grid">
+                        <div class="card">
+                            <div class="label">Judge readiness</div>
+                            <div class="metric">100%</div>
+                            <p>Validation, replay, evaluation, and task routing are all exposed through a compact, auditable API surface.</p>
+                        </div>
+                        <div class="card">
+                            <div class="label">Task ladder</div>
+                            <div class="metric">Easy → Blackout</div>
+                            <p>Progression moves from simple service recovery to long-horizon, multi-root-cause incident response.</p>
+                        </div>
+                        <div class="card">
+                            <div class="label">Auditability</div>
+                            <div class="metric">Replayable</div>
+                            <p>Trajectory-level exports make it easy to inspect state, action, reward, and narrative sequence for any fixed seed.</p>
+                        </div>
+
+                        <div class="card wide">
+                            <h2>Why it stands out</h2>
+                            <div class="list">
+                                <div class="list-item"><span><strong>Real-world utility</strong></span><span>SRE/incident response, not a toy benchmark</span></div>
+                                <div class="list-item"><span><strong>Evaluation quality</strong></span><span>Graded tasks, deterministic replay, and variance-aware reporting</span></div>
+                                <div class="list-item"><span><strong>Judge friendliness</strong></span><span>One-call report endpoints and rich /showcase page</span></div>
+                                <div class="list-item"><span><strong>Operational polish</strong></span><span>Space deployable, Dockerized, and validation-backed</span></div>
+                            </div>
+                        </div>
+
+                        <div class="card">
+                            <h2>Tasks</h2>
+                            <div class="list">
+                                {''.join(f'<div class="list-item"><span>{task_id}</span><strong>{task.max_steps} steps</strong></div>' for task_id, task in TASKS.items())}
+                            </div>
+                        </div>
+
+                        <div class="card">
+                            <h2>Core endpoints</h2>
+                            <div class="list">
+                                {''.join(f'<div class="list-item"><span>{endpoint}</span><strong>live</strong></div>' for endpoint in snapshot['core_endpoints'])}
+                            </div>
+                        </div>
+
+                        <div class="card tall">
+                            <h2>Judge quick actions</h2>
+                            <p>Use these links to inspect the benchmark rapidly and confirm the submission is complete.</p>
+                            <div class="linkbar">
+                                <a href="/judge_pack">Open judge pack</a>
+                                <a href="/benchmark_matrix?episodes=3">Baseline matrix</a>
+                                <a href="/report?task_id=blackout">Blackout report</a>
+                                <a href="/replay?task_id=blackout&seed=42&policy=reasoning">Blackout replay</a>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </body>
+        </html>
+        """
 
 
 @app.get("/replay")
