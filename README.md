@@ -91,6 +91,11 @@ The agent receives a full snapshot of service health, incident state, traffic pr
 - Objective: sustain platform health across repeated incidents and shifting load.
 - What it tests: long-horizon adaptation and delayed credit assignment.
 
+### Task 5: blackout (70 steps)
+
+- Objective: survive a multi-wave regional outage while preserving both SLA and budget discipline.
+- What it tests: compounded failure handling, escalation discipline, and recovery orchestration under prolonged stress.
+
 ---
 
 ## Observation space
@@ -151,6 +156,16 @@ Per-step reward combines:
 
 The reward is dense enough to support learning while still penalizing passivity and unresolved critical incidents.
 
+### Anti-exploit safeguards
+
+The environment includes explicit controls to reduce reward hacking and brittle policies:
+
+- Unforced escalation penalty: paging human intervention without active high/critical pressure is penalized.
+- Passive-loop penalty: repeated `noop`/`page_human` streaks receive an additional penalty.
+- Budget failure boundary: episodes terminate early if cumulative operating cost exceeds a hard budget multiplier.
+
+These safeguards make high scores correlate with operationally meaningful behavior instead of trivial exploit patterns.
+
 ## Grading
 
 Each task has a deterministic grader that returns a score in the range [0.0, 1.0]. Graders are designed to reward partial progress rather than forcing binary success or failure.
@@ -159,22 +174,23 @@ Each task has a deterministic grader that returns a score in the range [0.0, 1.0
 - medium emphasizes rollback plus scaling under pressure
 - hard emphasizes stopping cascading failures before the platform collapses
 - longhaul emphasizes sustaining performance across repeated incidents and shifting load
+- blackout emphasizes outage survival with strict SLA and budget limits under sustained stress
 
-The grader favors uptime, latency, SLA protection, cost discipline, and incident recovery rather than a single brittle metric.
+The grader favors uptime, latency, SLA protection, cost discipline, incident recovery, and escalation discipline rather than a single brittle metric.
 
 ---
 
 ## Endpoints
 
-- POST `/reset?task_id={easy|medium|hard|longhaul}&seed=42`
-- POST `/step?task_id={easy|medium|hard|longhaul}`
-- GET `/state?task_id={easy|medium|hard|longhaul}`
-- GET `/grade?task_id={easy|medium|hard|longhaul}`
+- POST `/reset?task_id={easy|medium|hard|longhaul|blackout}&seed=42`
+- POST `/step?task_id={easy|medium|hard|longhaul|blackout}`
+- GET `/state?task_id={easy|medium|hard|longhaul|blackout}`
+- GET `/grade?task_id={easy|medium|hard|longhaul|blackout}`
 - GET `/tasks`
 - GET `/health`
-- GET `/visualize?task_id={easy|medium|hard|longhaul}`
-- GET `/baseline?task_id={easy|medium|hard|longhaul}&episodes=5`
-- GET `/metrics?task_id={easy|medium|hard|longhaul}`
+- GET `/visualize?task_id={easy|medium|hard|longhaul|blackout}`
+- GET `/baseline?task_id={easy|medium|hard|longhaul|blackout}&episodes=5`
+- GET `/metrics?task_id={easy|medium|hard|longhaul|blackout}`
 
 ---
 
@@ -205,7 +221,11 @@ python inference.py
 
 The inference script emits strict `[START]`, `[STEP]`, and `[END]` lines.
 
-The script reads `API_BASE_URL`, `MODEL_NAME`, `HF_TOKEN`, and `OPENAI_API_KEY` from the environment.
+The script reads `API_BASE_URL`, `MODEL_NAME`, `HF_TOKEN`, and optional `LOCAL_IMAGE_NAME` from the environment.
+
+Defaults are applied for `API_BASE_URL` and `MODEL_NAME` only. `HF_TOKEN` is intentionally left unset by default so the script can fall back to the deterministic heuristic controller when no token is available.
+
+If model inference is unavailable (for example quota/network issues), the script falls back to a deterministic heuristic controller instead of pure `noop`, which keeps evaluation runs stable and reproducible.
 
 ## Baseline scores
 
@@ -215,8 +235,19 @@ The script reads `API_BASE_URL`, `MODEL_NAME`, `HF_TOKEN`, and `OPENAI_API_KEY` 
 | medium | 0.62 |
 | hard | 0.49 |
 | longhaul | 0.44 |
+| blackout | 0.39 |
 
 These are baseline reference values and should be reproducible under a fixed seed.
+
+## RL evidence baseline
+
+To show task difficulty progression, run a deterministic comparison between noop and greedy reactive policies:
+
+```bash
+python greedy_baseline.py
+```
+
+The script prints a CSV table (`task,noop,greedy`) across fixed seeds so judges can quickly verify that harder tasks require multi-step planning beyond trivial baselines.
 
 ## Deployment
 
@@ -228,7 +259,7 @@ The repo includes a Dockerfile and OpenEnv manifest for Hugging Face Spaces depl
 - `openenv.yaml` includes metadata and task definitions
 - `docker build` works from the repo root
 - `inference.py` runs from the repo root
-- 4 tasks are available through `/tasks`
+- 5 tasks are available through `/tasks`
 - `/reset`, `/step`, `/state`, `/grade`, `/metrics`, and `/visualize` are implemented
 
 ---
@@ -247,11 +278,15 @@ incident-commander/
 ├── Dockerfile
 ├── README.md
 ├── inference.py
+├── greedy_baseline.py
 ├── openenv.yaml
 ├── pyproject.toml
 ├── requirements.txt
 ├── scripts/
-│   └── validate-submission.sh
+│   ├── validate-submission.sh
+│   └── test-local.py
+├── tests/
+│   └── test_env_contract.py
 ├── app/
 │   ├── main.py
 │   ├── env.py
