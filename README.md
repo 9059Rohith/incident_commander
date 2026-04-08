@@ -44,15 +44,6 @@ This environment is explicitly **systemic rather than atomic**: failures are cou
 
 The policy challenge is also **cognitive load under uncertainty**: observations can be noisy or stale, spot capacity can disappear, and priorities shift over time. High scores require robust decision-making, not brittle if-else reactions.
 
-## Why this is a strong hackathon submission
-
-- It models a job humans actually do: on-call incident response for an AI platform.
-- The task ladder is easy to explain and hard to game.
-- The reward is dense, interpretable, and aligned with production objectives.
-- The project includes typed models, a validator script, a baseline script, a Dockerfile, and a Hugging Face Space deployment path.
-- The action space mirrors production workflows (scale, reroute, rollback, quarantine, escalate) used in Kubernetes/Terraform-style operations.
-- The agent must manage uncertainty from noisy or delayed telemetry, not just react to clean threshold signals.
-
 ## Why RL and not just prompting
 
 This environment is not a one-shot question-answer task. The agent acts in a stateful system where actions change future dynamics, and the return depends on multi-step consequences.
@@ -65,6 +56,15 @@ Why prompting alone is insufficient:
 - Coupled failures: local fixes can worsen global behavior (for example, DB latency backpressure amplifying gateway load).
 
 A purely reactive prompt policy can look competent on simple episodes but fails on high-pressure horizons where planning depth matters.
+
+## Why this is a strong hackathon submission
+
+- It models a job humans actually do: on-call incident response for an AI platform.
+- The task ladder is easy to explain and hard to game.
+- The reward is dense, interpretable, and aligned with production objectives.
+- The project includes typed models, a validator script, a baseline script, a Dockerfile, and a Hugging Face Space deployment path.
+- The action space mirrors production workflows (scale, reroute, rollback, quarantine, escalate) used in Kubernetes/Terraform-style operations.
+- The agent must manage uncertainty from noisy or delayed telemetry, not just react to clean threshold signals.
 
 ## What changed in this version
 
@@ -103,7 +103,7 @@ The agent receives a full snapshot of service health, incident state, traffic pr
 - Objective: recover a single degraded API service under rising latency.
 - What it tests: basic recovery and action selection.
 
-### Task 2: medium (40 steps)
+### Task 2: medium / recovery calibration (40 steps)
 
 - Objective: handle a bad deploy and traffic surge with rollback and scaling.
 - What it tests: multi-step recovery under pressure.
@@ -296,15 +296,15 @@ Measured with `python greedy_baseline.py` over fixed seeds (`42..51`):
 | Task | Noop | Greedy reactive | Reasoning policy |
 |---|---:|---:|---:|
 | easy | 0.985 | 1.000 | 1.000 |
-| medium | 0.913 | 0.971 | 0.971 |
+| medium (recovery) | 0.913 | 0.971 | 0.971 |
 | hard | 0.240 | 0.324 | 0.324 |
 | longhaul | 0.251 | 0.337 | 0.270 |
 | blackout | 0.078 | 0.040 | 0.331 |
 
 Interpretation:
 
-- easy/medium are intentionally accessible to verify API correctness and grading behavior.
-- medium noop is high because incident pressure is recoverable in this calibration and the task is designed as a bridge from easy to hard; discriminative difficulty is concentrated in hard/longhaul/blackout.
+- easy and medium (recovery) are intentionally accessible to verify API correctness, rollback/scaling semantics, and grader determinism before entering adversarial phases.
+- medium is a recovery-calibration task, not the primary challenge benchmark; discriminative difficulty is concentrated in hard/longhaul/blackout.
 - hard/longhaul stay below 0.50 for naive/reactive policies, demonstrating that shallow heuristics are insufficient.
 - blackout shows a large gap between greedy and phase-aware reasoning due to thundering-herd dynamics and burn-budget pressure.
 - In blackout, `0.331` (reasoning) vs `0.040` (greedy) is an ~8.3x gap, direct evidence that phase-aware planning outperforms reactive heuristics.
@@ -330,6 +330,7 @@ Concrete walkthrough from `longhaul`:
 5. Steps 16-20: with proactive scale, latency and SLA breaches stay materially lower and outage is avoided.
 
 The reward impact appears roughly 10 steps after the action, which is exactly the delayed credit-assignment behavior RL is meant to capture.
+The reward for the `scale_service` action taken at step 6 only materialized at steps 16-20. That 10-step gap is the credit assignment problem: no rule bridges it, only learned experience can.
 
 ### Why blackout defeats greedy control
 
