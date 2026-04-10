@@ -100,3 +100,19 @@ def test_judge_pack_and_showcase_endpoints_exist() -> None:
     assert "/showcase" in payload["core_endpoints"]
     assert "judge_surface" in payload
     assert showcase.headers["content-type"].startswith("text/html")
+
+
+def test_forensic_and_quickstart_endpoints_exist() -> None:
+    client = TestClient(app)
+    forensic = client.get("/forensic_audit", params={"task_id": "hard", "seed": 42, "policy": "baseline"})
+    quickstart = client.get("/judge_quickstart")
+
+    forensic.raise_for_status()
+    quickstart.raise_for_status()
+
+    forensic_payload = forensic.json()
+    quickstart_payload = quickstart.json()
+    assert "diagnostics" in forensic_payload
+    assert "failure_taxonomy" in forensic_payload
+    assert isinstance(quickstart_payload.get("steps", []), list)
+    assert quickstart_payload.get("expected_signals", {}).get("counterfactual_diagnostics", False) is True

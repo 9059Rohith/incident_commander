@@ -56,6 +56,7 @@ class ScenarioState(BaseModel):
     cross_zone_packet_loss: float = 0.0
     db_primary_zone: str = "zone-a"
     db_failover_complete: bool = False
+    region_link_health: Dict[str, float] = Field(default_factory=dict)
 
 
 class EmergencyUnitState(BaseModel):
@@ -90,6 +91,9 @@ class IncidentCommanderObservation(BaseModel):
     emergency_units: Dict[str, EmergencyUnitState] = Field(default_factory=dict)
     strategic_options: List[str] = Field(default_factory=list)
     tactical_options: List[str] = Field(default_factory=list)
+    region_status: Dict[str, float] = Field(default_factory=dict)
+    dependency_graph: Dict[str, List[str]] = Field(default_factory=dict)
+    commitment_mode: str = "adaptive"
 
 
 class IncidentCommanderAction(BaseModel):
@@ -156,6 +160,8 @@ class IncidentCommanderReward(BaseModel):
     civilians_saved_bonus: float = 0.0
     delayed_response_penalty: float = 0.0
     wrong_dispatch_penalty: float = 0.0
+    commitment_penalty: float = 0.0
+    graph_outage_penalty: float = 0.0
 
 
 class TaskConfig(BaseModel):
@@ -171,6 +177,7 @@ class TaskConfig(BaseModel):
     spot_disruption_chance: float = 0.0
     memory_leak_rate: float = 0.0
     thundering_herd: bool = False
+    adversarial_shift_rate: float = 0.0
     scenario_mix: List[Literal["resource_exhaustion", "config_drift", "heisenbug", "regional_outage"]] = Field(default_factory=lambda: ["resource_exhaustion"])
 
 
@@ -191,6 +198,7 @@ class EpisodeResult(BaseModel):
     root_cause_identification_rate: float = 0.0
     safe_ops_score: float = 1.0
     verification_score: float = 0.0
+    commitment_switches: int = 0
     db_recovered: bool = False
     auth_recovered: bool = False
     frontend_recovered: bool = False

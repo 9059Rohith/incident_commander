@@ -36,6 +36,8 @@ endpoints:
   benchmark_matrix: /benchmark_matrix
   replay: /replay
   evaluation_report: /evaluation_report
+  forensic_audit: /forensic_audit
+  judge_quickstart: /judge_quickstart
   judge_pack: /judge_pack
   showcase: /showcase
 tags:

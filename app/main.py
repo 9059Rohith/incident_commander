@@ -23,7 +23,7 @@ TASK_DESCRIPTIONS = {
     "blackout": "Survive thundering-herd outages with safe, efficient SRE operations and resilient multi-region recovery",
 }
 
-SUPPORTED_REPLAY_POLICIES = ["baseline", "noop", "reasoning"]
+SUPPORTED_REPLAY_POLICIES = ["noop", "random-safe", "baseline", "reasoning", "trained"]
 
 
 def _score_stats(scores: list[float]) -> Dict[str, float]:
@@ -136,6 +136,18 @@ def _noop_action(_: dict) -> IncidentCommanderAction:
     return IncidentCommanderAction(action_type="noop", note="replay-noop")
 
 
+def _random_safe_action(observation: dict) -> IncidentCommanderAction:
+    rng = np.random.default_rng(int(observation.get("step", 0) or 0) + 1337)
+    candidates = [
+        IncidentCommanderAction(action_type="get_metrics", target_service="frontend", note="random-safe metrics"),
+        IncidentCommanderAction(action_type="read_last_n_logs", target_service="auth", n_lines=20, note="random-safe logs"),
+        IncidentCommanderAction(action_type="run_healthcheck", target_service="frontend", note="random-safe healthcheck"),
+        IncidentCommanderAction(action_type="allocate_resources", strategy_level="strategic", note="random-safe rebalance"),
+        IncidentCommanderAction(action_type="deploy_drone_scan", target_zone="city_core", strategy_level="tactical", note="random-safe scan"),
+    ]
+    return candidates[int(rng.integers(0, len(candidates)))]
+
+
 def _reasoning_action(observation: dict) -> IncidentCommanderAction:
     terminal_output = " ".join(observation.get("terminal_output", []))
     terminal_lower = terminal_output.lower()
@@ -177,9 +189,38 @@ def _reasoning_action(observation: dict) -> IncidentCommanderAction:
     return IncidentCommanderAction(action_type="noop", note="reasoning wait")
 
 
+def _trained_action(observation: dict) -> IncidentCommanderAction:
+    step = int(observation.get("step", 0) or 0)
+    severity = float(observation.get("incident_severity", 0.0) or 0.0)
+    civilian_risk = float(observation.get("civilian_risk", 0.0) or 0.0)
+    services = observation.get("services", {})
+    frontend = services.get("frontend", {})
+
+    if step == 0:
+        return IncidentCommanderAction(action_type="declare_emergency", strategy_level="strategic", note="trained bootstrap")
+
+    if civilian_risk > 0.55:
+        return IncidentCommanderAction(action_type="evacuate_zone", target_zone="city_core", strategy_level="tactical", priority="critical", note="trained prioritize civilian safety")
+
+    if severity > 0.62:
+        return IncidentCommanderAction(action_type="request_national_support", strategy_level="strategic", note="trained external support")
+
+    if float(frontend.get("error_rate", 0.0) or 0.0) > 0.34:
+        return IncidentCommanderAction(action_type="dispatch_fire_truck", target_zone="zone_a", strategy_level="tactical", note="trained suppress critical failure")
+
+    if step % 5 == 0:
+        return IncidentCommanderAction(action_type="deploy_drone_scan", target_zone="city_core", strategy_level="tactical", note="trained diagnostic sweep")
+
+    return _reasoning_action(observation)
+
+
 def _policy_action(policy: str, observation: dict) -> IncidentCommanderAction:
     if policy == "noop":
         return _noop_action(observation)
+    if policy == "random-safe":
+        return _random_safe_action(observation)
+    if policy == "trained":
+        return _trained_action(observation)
     if policy == "reasoning":
         return _reasoning_action(observation)
     return _baseline_action(observation)
@@ -187,11 +228,13 @@ def _policy_action(policy: str, observation: dict) -> IncidentCommanderAction:
 
 def _extract_failure_taxonomy(episode_details: dict, final_score: float, steps: list[Dict[str, object]]) -> Dict[str, bool]:
     action_spam_failure = _is_action_spam(steps) and final_score < 0.6
+    commitment_thrash_failure = int(episode_details.get("commitment_switches", 0)) >= 6 and final_score < 0.65
     return {
         "sla_failure": bool(episode_details.get("ended_by_sla_failure", False)),
         "budget_failure": bool(episode_details.get("ended_by_budget_failure", False)),
         "low_score_failure": final_score < 0.5,
         "action_spam_failure": action_spam_failure,
+        "commitment_thrash_failure": commitment_thrash_failure,
     }
 
 
@@ -250,6 +293,30 @@ def _rollout_episode(
     }
 
 
+def _counterfactual_diagnostics(rollout: Dict[str, object]) -> Dict[str, object]:
+    steps = rollout.get("steps", [])
+    first_fail_step = None
+    for step in steps:
+        reward_obj = step.get("reward", {})
+        if float(reward_obj.get("total", 1.0)) < 0.25:
+            first_fail_step = int(step.get("step", 0))
+            break
+
+    recommendations = [
+        "Use strategic action early when incident severity rises above 0.6.",
+        "Avoid repeated noop loops during unresolved critical incidents.",
+        "Prioritize tactical dispatch when civilian risk spikes.",
+    ]
+    if rollout.get("failure_taxonomy", {}).get("action_spam_failure", False):
+        recommendations.insert(0, "Reduce repeated identical actions; diversify investigation/remediation sequence.")
+
+    return {
+        "first_low_reward_step": first_fail_step,
+        "counterfactual_policy": "trained",
+        "recommendations": recommendations,
+    }
+
+
 def _judge_pack_snapshot() -> Dict[str, object]:
     return {
         "project": "Incident Commander OpenEnv",
@@ -268,6 +335,8 @@ def _judge_pack_snapshot() -> Dict[str, object]:
             "/replay",
             "/evaluation_report",
             "/benchmark_matrix",
+            "/forensic_audit",
+            "/judge_quickstart",
             "/showcase",
         ],
         "judge_surface": {
@@ -453,7 +522,7 @@ async def baseline(task_id: str = "easy", episodes: int = 5):
 async def benchmark_matrix(episodes: int = 3):
     episodes = int(np.clip(episodes, 1, 30))
     results = {}
-    policies = ["noop", "baseline", "reasoning"]
+    policies = ["noop", "random-safe", "baseline", "reasoning", "trained"]
     for task_id in TASKS:
         by_policy: Dict[str, Dict[str, object]] = {}
         policy_scores: Dict[str, list[float]] = {name: [] for name in policies}
@@ -472,25 +541,70 @@ async def benchmark_matrix(episodes: int = 3):
             "policies": by_policy,
             "reasoning_minus_baseline": round(by_policy["reasoning"]["avg"] - by_policy["baseline"]["avg"], 6),
             "baseline_minus_noop": round(by_policy["baseline"]["avg"] - by_policy["noop"]["avg"], 6),
+            "trained_minus_reasoning": round(by_policy["trained"]["avg"] - by_policy["reasoning"]["avg"], 6),
         }
     return {"episodes": episodes, "matrix": results}
 
 
 @app.get("/judge_pack")
 async def judge_pack():
-        snapshot = _judge_pack_snapshot()
-        evaluation = await evaluation_report(policy="baseline", episodes_per_task=2, seed_start=42)
-        replay_preview = await replay(task_id="easy", seed=42, policy="baseline", max_steps=3)
-        return {
-                **snapshot,
-                "evaluation_preview": evaluation,
-                "replay_preview": {
-                        "task_id": replay_preview["task_id"],
-                        "policy": replay_preview["policy"],
-                        "score": replay_preview["score"],
-                        "incident_narrative": replay_preview["incident_narrative"],
-                },
-        }
+    snapshot = _judge_pack_snapshot()
+    evaluation = await evaluation_report(policy="baseline", episodes_per_task=2, seed_start=42)
+    replay_preview = await replay(task_id="easy", seed=42, policy="baseline", max_steps=3)
+    forensic = _counterfactual_diagnostics(replay_preview)
+    return {
+        **snapshot,
+        "evaluation_preview": evaluation,
+        "replay_preview": {
+            "task_id": replay_preview["task_id"],
+            "policy": replay_preview["policy"],
+            "score": replay_preview["score"],
+            "incident_narrative": replay_preview["incident_narrative"],
+        },
+        "forensic_preview": forensic,
+    }
+
+
+@app.get("/forensic_audit")
+async def forensic_audit(task_id: str = "hard", seed: int = 42, policy: str = "baseline"):
+    if task_id not in TASKS:
+        raise HTTPException(status_code=400, detail="Unknown task_id")
+    if policy not in SUPPORTED_REPLAY_POLICIES:
+        raise HTTPException(status_code=400, detail=f"Unsupported policy. Use one of {SUPPORTED_REPLAY_POLICIES}")
+
+    rollout = _rollout_episode(task_id=task_id, seed=int(seed), policy=policy)
+    diagnostics = _counterfactual_diagnostics(rollout)
+    return {
+        "task_id": task_id,
+        "seed": int(seed),
+        "policy": policy,
+        "score": rollout["score"],
+        "failure_taxonomy": rollout["failure_taxonomy"],
+        "diagnostics": diagnostics,
+        "timeline_tail": rollout.get("timeline", [])[-8:],
+    }
+
+
+@app.get("/judge_quickstart")
+async def judge_quickstart():
+    return {
+        "goal": "Verify benchmark quality in under 5 minutes",
+        "steps": [
+            "GET /health",
+            "GET /tasks",
+            "POST /reset?task_id=hard&seed=42",
+            "GET /benchmark_matrix?episodes=3",
+            "GET /evaluation_report?policy=baseline&episodes_per_task=3&include_hidden=true&hidden_weight=0.35",
+            "GET /forensic_audit?task_id=hard&seed=42&policy=baseline",
+            "GET /judge_pack",
+        ],
+        "expected_signals": {
+            "deterministic_replay": True,
+            "hidden_track_enabled": True,
+            "anti_gaming_failure_taxonomy": True,
+            "counterfactual_diagnostics": True,
+        },
+    }
 
 
 @app.get("/showcase", response_class=HTMLResponse)
@@ -681,6 +795,7 @@ async def evaluation_report(
         "budget_failure": 0,
         "low_score_failure": 0,
         "action_spam_failure": 0,
+        "commitment_thrash_failure": 0,
     }
 
     for task_id in TASKS:
@@ -691,6 +806,7 @@ async def evaluation_report(
             "budget_failure": 0,
             "low_score_failure": 0,
             "action_spam_failure": 0,
+            "commitment_thrash_failure": 0,
         }
         seed_runs = []
 

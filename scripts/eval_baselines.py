@@ -23,9 +23,21 @@ def _stats(scores: List[float]) -> Dict[str, float]:
     }
 
 
+def _mean_diff_z(a: List[float], b: List[float]) -> float:
+    if not a or not b:
+        return 0.0
+    n = min(len(a), len(b))
+    paired = [a[i] - b[i] for i in range(n)]
+    avg = mean(paired)
+    std = pstdev(paired) if len(paired) > 1 else 0.0
+    if std == 0.0:
+        return 0.0
+    return round(avg / (std / sqrt(max(1, len(paired)))), 6)
+
+
 def main() -> None:
     seeds = list(range(42, 72))
-    policies = ["noop", "baseline", "reasoning"]
+    policies = ["noop", "random-safe", "baseline", "reasoning", "trained"]
 
     report: Dict[str, object] = {
         "seeds": seeds,
@@ -42,10 +54,15 @@ def main() -> None:
 
         report["tasks"][task_id] = {
             "noop": _stats(task_scores["noop"]),
+            "random-safe": _stats(task_scores["random-safe"]),
             "baseline": _stats(task_scores["baseline"]),
             "reasoning": _stats(task_scores["reasoning"]),
+            "trained": _stats(task_scores["trained"]),
             "reasoning_minus_baseline": round(mean(task_scores["reasoning"]) - mean(task_scores["baseline"]), 6),
             "baseline_minus_noop": round(mean(task_scores["baseline"]) - mean(task_scores["noop"]), 6),
+            "trained_minus_reasoning": round(mean(task_scores["trained"]) - mean(task_scores["reasoning"]), 6),
+            "z_reasoning_vs_baseline": _mean_diff_z(task_scores["reasoning"], task_scores["baseline"]),
+            "z_trained_vs_reasoning": _mean_diff_z(task_scores["trained"], task_scores["reasoning"]),
         }
 
     print(json.dumps(report, indent=2))

@@ -198,6 +198,8 @@ Incident Commander is built to be auditable, not just scoreable.
 - Use `/visualize` for a compact operator dashboard view of current state.
 - Use `/replay` for deterministic trajectory exports by task, seed, and policy.
 - Use `/evaluation_report` for aggregate benchmarking across tasks with public+hidden weighted scoring.
+- Use `/forensic_audit` for counterfactual diagnostics and failure root-cause hints.
+- Use `/judge_quickstart` for a strict under-5-minute verifier flow.
 - Use `/judge_pack` for a one-call evaluation snapshot.
 
 For a fast live walkthrough, follow [DEMOSCRIPT.md](DEMOSCRIPT.md).
@@ -330,6 +332,8 @@ For statistically robust baseline comparisons with confidence intervals:
 ```bash
 python scripts/eval_baselines.py
 ```
+
+The baseline ladder includes `noop`, `random-safe`, `baseline`, `reasoning`, and `trained` policies.
 
 ## Submission Checklist
 

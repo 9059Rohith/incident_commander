@@ -32,6 +32,8 @@ class RewardCalculator:
         civilian_risk: float,
         delayed_response_steps: int,
         wrong_dispatches: int,
+        commitment_switches: int,
+        graph_outage_ratio: float,
     ) -> IncidentCommanderReward:
         uptime = max(0.0, min(1.0, uptime_ratio))
         latency = max(0.0, min(1.0, 1.0 - obs.p95_latency / 700.0))
@@ -48,6 +50,8 @@ class RewardCalculator:
         civilians_saved_bonus = max(0.0, min(0.25, 0.015 * civilians_saved))
         delayed_response_penalty = max(0.0, min(0.20, 0.01 * delayed_response_steps + 0.08 * civilian_risk))
         wrong_dispatch_penalty = max(0.0, min(0.20, 0.06 * wrong_dispatches))
+        commitment_penalty = max(0.0, min(0.18, 0.025 * commitment_switches))
+        graph_outage_penalty = max(0.0, min(0.22, 0.24 * graph_outage_ratio))
 
         total = success - latency_penalty - resource_waste_penalty - incorrect_action_penalty - safety_penalty
         if action.action_type == "noop" and unresolved_critical > 0:
@@ -90,6 +94,8 @@ class RewardCalculator:
         total -= anti_panic_penalty
         total -= delayed_response_penalty
         total -= wrong_dispatch_penalty
+        total -= commitment_penalty
+        total -= graph_outage_penalty
 
         total = max(0.0, min(1.0, total))
         return IncidentCommanderReward(
@@ -109,4 +115,6 @@ class RewardCalculator:
             civilians_saved_bonus=round(civilians_saved_bonus, 4),
             delayed_response_penalty=round(delayed_response_penalty, 4),
             wrong_dispatch_penalty=round(wrong_dispatch_penalty, 4),
+            commitment_penalty=round(commitment_penalty, 4),
+            graph_outage_penalty=round(graph_outage_penalty, 4),
         )

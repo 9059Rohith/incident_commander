@@ -29,6 +29,7 @@ TASKS: Dict[str, TaskConfig] = {
         cost_budget=0.55,
         max_sla_breaches=10,
         observation_noise=0.02,
+        adversarial_shift_rate=0.01,
         scenario_mix=["resource_exhaustion"],
     ),
     "medium": TaskConfig(
@@ -40,6 +41,7 @@ TASKS: Dict[str, TaskConfig] = {
         cost_budget=0.64,
         max_sla_breaches=9,
         observation_noise=0.05,
+        adversarial_shift_rate=0.02,
         scenario_mix=["resource_exhaustion", "config_drift"],
     ),
     "hard": TaskConfig(
@@ -51,6 +53,7 @@ TASKS: Dict[str, TaskConfig] = {
         cost_budget=0.72,
         max_sla_breaches=8,
         observation_noise=0.08,
+        adversarial_shift_rate=0.035,
         scenario_mix=["config_drift", "heisenbug", "regional_outage"],
     ),
     "longhaul": TaskConfig(
@@ -62,6 +65,7 @@ TASKS: Dict[str, TaskConfig] = {
         cost_budget=0.8,
         max_sla_breaches=8,
         observation_noise=0.1,
+        adversarial_shift_rate=0.05,
         scenario_mix=["resource_exhaustion", "config_drift", "heisenbug", "regional_outage"],
     ),
     "blackout": TaskConfig(
@@ -73,6 +77,7 @@ TASKS: Dict[str, TaskConfig] = {
         cost_budget=0.88,
         max_sla_breaches=7,
         observation_noise=0.14,
+        adversarial_shift_rate=0.07,
         thundering_herd=True,
         scenario_mix=["resource_exhaustion", "config_drift", "heisenbug", "regional_outage"],
     ),
@@ -134,10 +139,16 @@ class IncidentCommanderEnv:
         self.incident_severity = 0.30
         self.incident_type = "infra_outage"
         self.weather_condition = "clear"
+        self.region_status: Dict[str, float] = {}
+        self.dependency_graph: Dict[str, List[str]] = {}
+        self.link_outage_ratio = 0.0
         self.civilians_saved = 0
         self.wrong_dispatches = 0
         self.delayed_response_steps = 0
         self.recent_dispatch_effect = 0.0
+        self.commitment_mode = "adaptive"
+        self.last_strategy_level: Optional[str] = None
+        self.commitment_switches = 0
 
         self.last_observed_metrics: Dict[str, Tuple[Optional[float], Optional[float]]] = {}
 
@@ -158,6 +169,17 @@ class IncidentCommanderEnv:
         self.services["frontend"].reachable_upstreams = ["auth"]
         self.services["auth"].reachable_upstreams = ["db"]
         self.services["db"].reachable_upstreams = []
+        self.dependency_graph = {
+            "frontend": ["auth"],
+            "auth": ["db"],
+            "db": [],
+        }
+        self.region_status = {
+            "zone_a": 1.0,
+            "zone_b": 1.0,
+            "zone_c": 1.0,
+        }
+        self.link_outage_ratio = 0.0
 
         self.active_incidents = []
         self.emergency_units = {
@@ -202,6 +224,9 @@ class IncidentCommanderEnv:
         self.incident_severity = 0.30
         self.incident_type = "infra_outage"
         self.weather_condition = "clear"
+        self.commitment_mode = "adaptive"
+        self.last_strategy_level = None
+        self.commitment_switches = 0
         self.civilians_saved = 0
         self.wrong_dispatches = 0
         self.delayed_response_steps = 0
@@ -234,6 +259,18 @@ class IncidentCommanderEnv:
             return self._get_observation(), self.last_reward, True, {"error": "Episode already done"}
 
         clean_action = self._sanitize_action(action)
+        action_level = clean_action.strategy_level
+        if action_level is None:
+            if clean_action.action_type in {"declare_emergency", "allocate_resources", "request_national_support"}:
+                action_level = "strategic"
+            elif clean_action.action_type in {"dispatch_fire_truck", "send_medical_team", "deploy_drone_scan", "evacuate_zone", "request_backup"}:
+                action_level = "tactical"
+        if action_level is not None and self.last_strategy_level is not None and action_level != self.last_strategy_level:
+            self.commitment_switches += 1
+        if action_level is not None:
+            self.last_strategy_level = action_level
+            self.commitment_mode = action_level
+
         unresolved_critical_before = sum(1 for i in self.active_incidents if not i.resolved and i.severity == "critical")
         self.action_counts[clean_action.action_type] += 1
 
@@ -312,6 +349,8 @@ class IncidentCommanderEnv:
             civilian_risk=self.civilian_risk,
             delayed_response_steps=self.delayed_response_steps,
             wrong_dispatches=self.wrong_dispatches,
+            commitment_switches=self.commitment_switches,
+            graph_outage_ratio=self.link_outage_ratio,
         )
 
         self.last_reward = reward
@@ -664,6 +703,32 @@ class IncidentCommanderEnv:
         else:
             self.incident_type = "infra_outage"
 
+        if self.task.adversarial_shift_rate > 0 and self.rng.random() < self.task.adversarial_shift_rate:
+            burst = float(self.rng.uniform(0.05, 0.12))
+            self.incident_severity = float(np.clip(self.incident_severity + burst, 0.0, 1.0))
+            self.civilian_risk = float(np.clip(self.civilian_risk + (burst * 0.7), 0.0, 1.0))
+            self._append_timeline("Adversarial shift: unexpected secondary outage wave")
+
+        self._simulate_topology_disruptions()
+
+    def _simulate_topology_disruptions(self) -> None:
+        if not self.region_status:
+            return
+        for zone in list(self.region_status.keys()):
+            decay = 0.0
+            if self.scenario.scenario_id == "regional_outage":
+                decay += 0.02
+            decay += max(0.0, self.incident_severity - 0.55) * 0.04
+            if self.weather_condition == "storm":
+                decay += 0.03
+            if zone == "zone_b" and self.scenario.db_primary_zone == "zone-a" and not self.scenario.db_failover_complete:
+                decay += 0.02
+            self.region_status[zone] = float(np.clip(self.region_status[zone] - decay, 0.25, 1.0))
+        self.scenario.region_link_health = {k: round(v, 4) for k, v in self.region_status.items()}
+
+        healthy_links = [v for v in self.region_status.values() if v >= 0.7]
+        self.link_outage_ratio = 1.0 - (len(healthy_links) / max(1, len(self.region_status)))
+
     def _inject_scheduled_incident_event(self) -> None:
         # Scheduled shocks make long-horizon tasks non-trivial and improve task separation by difficulty.
         if self.timestep <= 0 or self.timestep not in self.task.incident_schedule:
@@ -775,7 +840,7 @@ class IncidentCommanderEnv:
         if self.scenario.scenario_id == "regional_outage" and not self.scenario.db_failover_complete:
             db_penalty += 0.55 * self.scenario.cross_zone_packet_loss
 
-        systemic_pressure = 1.0 + (self.incident_severity * 0.25) + (self.civilian_risk * 0.10)
+        systemic_pressure = 1.0 + (self.incident_severity * 0.25) + (self.civilian_risk * 0.10) + (self.link_outage_ratio * 0.30)
 
         for name, svc in self.services.items():
             pressure = 1.0
@@ -909,6 +974,8 @@ class IncidentCommanderEnv:
             return False
         if dest == "db" and self.scenario.db_port_actual != self.scenario.db_port_expected:
             return False
+        if self.link_outage_ratio > 0.45 and source in self.dependency_graph and dest in self.dependency_graph.get(source, []):
+            return False
         return self.services[source].healthy and self.services[dest].healthy
 
     def _healthcheck(self, target: Optional[str]) -> bool:
@@ -968,6 +1035,8 @@ class IncidentCommanderEnv:
         if scenario_id == "regional_outage":
             self.scenario.cross_zone_packet_loss = 0.0
             self.scenario.db_failover_complete = True
+            for zone in self.region_status:
+                self.region_status[zone] = min(1.0, self.region_status[zone] + 0.10)
 
     def _select_scenario(self) -> str:
         choices = self.task.scenario_mix or ["resource_exhaustion"]
@@ -976,9 +1045,18 @@ class IncidentCommanderEnv:
 
     def _build_scenario(self, scenario_id: str) -> ScenarioState:
         if scenario_id == "resource_exhaustion":
-            return ScenarioState(scenario_id="resource_exhaustion", noisy_neighbor_io=0.45)
+            return ScenarioState(
+                scenario_id="resource_exhaustion",
+                noisy_neighbor_io=0.45,
+                region_link_health={"zone_a": 0.96, "zone_b": 0.94, "zone_c": 0.95},
+            )
         if scenario_id == "config_drift":
-            return ScenarioState(scenario_id="config_drift", db_port_expected=5432, db_port_actual=15432)
+            return ScenarioState(
+                scenario_id="config_drift",
+                db_port_expected=5432,
+                db_port_actual=15432,
+                region_link_health={"zone_a": 0.95, "zone_b": 0.93, "zone_c": 0.94},
+            )
         if scenario_id == "regional_outage":
             return ScenarioState(
                 scenario_id="regional_outage",
@@ -987,10 +1065,19 @@ class IncidentCommanderEnv:
                 cross_zone_packet_loss=0.42,
                 db_primary_zone="zone-a",
                 db_failover_complete=False,
+                region_link_health={"zone_a": 0.72, "zone_b": 0.65, "zone_c": 0.78},
             )
-        return ScenarioState(scenario_id="heisenbug", heisenbug_armed=False, heisenbug_triggered=False)
+        return ScenarioState(
+            scenario_id="heisenbug",
+            heisenbug_armed=False,
+            heisenbug_triggered=False,
+            region_link_health={"zone_a": 0.93, "zone_b": 0.90, "zone_c": 0.91},
+        )
 
     def _apply_scenario_bootstrap(self) -> None:
+        if self.scenario.region_link_health:
+            for zone, health in self.scenario.region_link_health.items():
+                self.region_status[zone] = float(np.clip(health, 0.25, 1.0))
         if self.scenario.scenario_id == "config_drift":
             self.config_broken["db_port"] = str(self.scenario.db_port_actual)
             self.config_runtime = dict(self.config_broken)
@@ -1117,6 +1204,9 @@ class IncidentCommanderEnv:
             emergency_units={k: v.model_copy(deep=True) for k, v in self.emergency_units.items()},
             strategic_options=["declare_emergency", "allocate_resources", "request_national_support"],
             tactical_options=["dispatch_fire_truck", "send_medical_team", "deploy_drone_scan", "evacuate_zone", "request_backup"],
+            region_status={k: round(v, 4) for k, v in self.region_status.items()},
+            dependency_graph={k: list(v) for k, v in self.dependency_graph.items()},
+            commitment_mode=self.commitment_mode,
         )
 
     def get_state(self) -> Dict[str, object]:
@@ -1141,6 +1231,11 @@ class IncidentCommanderEnv:
             "civilian_risk": round(self.civilian_risk, 4),
             "civilians_saved": self.civilians_saved,
             "emergency_units": {k: v.model_dump() for k, v in self.emergency_units.items()},
+            "region_status": {k: round(v, 4) for k, v in self.region_status.items()},
+            "dependency_graph": {k: list(v) for k, v in self.dependency_graph.items()},
+            "commitment_mode": self.commitment_mode,
+            "commitment_switches": self.commitment_switches,
+            "link_outage_ratio": round(self.link_outage_ratio, 6),
         }
 
     def get_metrics(self) -> Dict[str, object]:
@@ -1179,6 +1274,8 @@ class IncidentCommanderEnv:
             "civilians_saved": int(self.civilians_saved),
             "wrong_dispatches": int(self.wrong_dispatches),
             "delayed_response_steps": int(self.delayed_response_steps),
+            "commitment_switches": int(self.commitment_switches),
+            "link_outage_ratio": round(self.link_outage_ratio, 6),
             "timeline": self.live_timeline,
             "reward_trace": self.reward_trace,
         }
@@ -1213,6 +1310,7 @@ class IncidentCommanderEnv:
             root_cause_identification_rate=float(metrics["root_cause_identification_rate"]),
             safe_ops_score=float(metrics["safe_ops_score"]),
             verification_score=float(metrics["verification_score"]),
+            commitment_switches=int(metrics["commitment_switches"]),
             db_recovered=self.services["db"].healthy and self.scenario.db_port_actual == self.scenario.db_port_expected,
             auth_recovered=self.services["auth"].healthy,
             frontend_recovered=self.services["frontend"].healthy,
