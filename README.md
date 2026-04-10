@@ -203,6 +203,7 @@ Incident Commander is built to be auditable, not just scoreable.
 - Use `/judge_pack` for a one-call evaluation snapshot.
 
 For a fast live walkthrough, follow [DEMOSCRIPT.md](DEMOSCRIPT.md).
+For execution sequencing with file-level milestones, follow [IMPLEMENTATION_ROADMAP_7D.md](IMPLEMENTATION_ROADMAP_7D.md).
 
 ## Hidden Evaluation Track
 
