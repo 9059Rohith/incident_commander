@@ -15,62 +15,52 @@ tags:
   - agent
   - rl-environment
 license: mit
-short_description: LLM incident response benchmark for AI platforms
+short_description: Simulated incident response benchmark for AI platform operations
 ---
 
 # Incident Commander OpenEnv
 
-> A real-world RL environment where an agent acts as the on-call incident commander for a simulated AI platform.
+A CPU-only OpenEnv benchmark where an LLM agent acts as the incident commander for a simulated AI platform. The agent investigates masked outages, chooses structured remediation actions, and is scored on recovery, latency, cost, and operational discipline.
 
 [![openenv](https://img.shields.io/badge/openenv-compatible-blue)](https://meta-pytorch.org/OpenEnv/)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-green)](https://www.python.org/)
 [![Docker](https://img.shields.io/badge/docker-required-informational)](https://www.docker.com/)
-[![CPU Only](https://img.shields.io/badge/GPU-not%20required-success)](https://meta-pytorch.org/OpenEnv/)
+[![GPU Not Required](https://img.shields.io/badge/GPU-not%20required-success)](https://meta-pytorch.org/OpenEnv/)
 
 Quick links: [Judge Guide](JUDGES_GUIDE.md) | [Submission Brief](HACKATHON_SUBMISSION_BRIEF.md) | [Pre-Submission Checklist](PRE_SUBMISSION_CHECKLIST.md)
 
----
-
 ## Overview
 
-Incident Commander OpenEnv is a CPU-only RL benchmark for real-world incident response. An agent acts as the on-call commander for a simulated AI platform and must diagnose, remediate, and verify service outages under partial observability, changing load, and budget constraints.
+Incident Commander models the on-call workflow for a small AI platform with three coupled services: `frontend`, `auth`, and `db`. Each episode is a black-box incident response problem. The agent observes the current state, inspects logs or metrics, takes a typed action, and tries to recover service without burning budget or causing avoidable escalation.
 
-The environment is designed for hackathon submission quality: typed models, deterministic graders, reproducible baseline runs, Dockerized deployment, and judge-friendly inspection endpoints.
+The environment is designed to be deterministic under fixed seeds, easy to validate locally and in CI, compatible with Hugging Face Spaces and Docker, and transparent enough for judges to inspect replays, reports, and baseline comparisons.
 
-## What it simulates
+## Tasks
 
-The simulated platform has three coupled services:
-
-- `frontend`: customer-facing API and web edge
-- `auth`: identity and token service
-- `db`: persistent backing service for auth/session data
-
-The agent sees noisy operational telemetry, masked incidents, and a timeline of recent actions. Root causes are intentionally hidden until the agent investigates logs, metrics, and connectivity.
-
-## Task ladder
-
-The project includes five deterministic tasks with increasing difficulty:
+The project ships with five canonical tasks and deterministic graders:
 
 | Task | Steps | Focus |
 |---|---:|---|
-| `easy` | 30 | Recover a degraded service quickly |
-| `medium` | 40 | Calibrate rollback and scaling under pressure |
-| `hard` | 50 | Resolve cascading failures across frontend/auth/db |
-| `longhaul` | 60 | Handle delayed-credit, long-horizon incidents |
-| `blackout` | 70 | Survive thundering-herd pressure while protecting budget |
+| `easy` | 30 | Trace frontend failures to root cause and restore service health |
+| `medium` | 40 | Investigate dependency failures across frontend/auth/db under pressure |
+| `hard` | 50 | Recover from config drift, regional network issues, and high-load race conditions with verification |
+| `longhaul` | 60 | Handle mixed outages with black-box telemetry and budget-aware remediation |
+| `blackout` | 70 | Survive thundering-herd outages with safe, efficient SRE operations and resilient multi-region recovery |
 
-## Environment design
+All task scores are normalized to `[0.0, 1.0]`, and the success threshold is `0.5`.
 
-The control loop is intentionally simple but operationally realistic:
+## Control Loop
 
-1. Observe the current incident state.
-2. Choose an action from the typed toolbelt.
-3. Apply action effects and scheduled scenario shocks.
-4. Simulate service load, latency, uptime, and cost.
-5. Compute decomposed reward and update incident state.
-6. End the episode on max steps, SLA failure, budget failure, or full recovery.
+The environment follows a simple but operationally realistic loop:
 
-### Observation space
+1. Call `/reset` for a chosen `task_id`.
+2. Inspect the returned observation.
+3. Choose a single structured action.
+4. Apply the action with `/step`.
+5. Monitor state, reward, and incident progress.
+6. Finish when the episode ends, the task is recovered, or a failure condition is reached.
+
+### Observation Space
 
 Each step returns a structured snapshot containing:
 
@@ -87,7 +77,7 @@ Each step returns a structured snapshot containing:
 | `symptoms`, `terminal_output`, `investigation_log`, `live_timeline` | Human-readable incident context |
 | `available_actions` | Explicit action list for the policy |
 
-### Action space
+### Action Space
 
 The environment supports these actions:
 
@@ -108,13 +98,13 @@ The environment supports these actions:
 | `run_command` | Simulated operational command |
 | `noop` | Do nothing |
 
-## Reward and grading
+## Reward and Grading
 
 Reward is dense and inspectable. It combines uptime, latency, SLA compliance, cost, recovery, MTTR bonus, burn-budget penalty, anti-panic penalty, and safety penalties.
 
-Each task has a deterministic grader that returns a score in `[0.0, 1.0]` and rewards partial progress instead of only binary success.
+Each task has a deterministic grader in `server.tasks` that returns a score in `[0.0, 1.0]` and rewards partial progress instead of only binary success.
 
-## API surface
+## API Surface
 
 The main endpoints are:
 
@@ -126,6 +116,8 @@ The main endpoints are:
 - `GET /health`
 - `GET /metrics`
 - `GET /report`
+- `GET /visualize`
+- `GET /baseline`
 - `GET /benchmark_matrix`
 - `GET /replay`
 - `GET /evaluation_report`
@@ -134,7 +126,7 @@ The main endpoints are:
 
 The `/metrics` endpoint supports `include_trace=true|false`. The `/replay` endpoint exports a deterministic full trajectory for a fixed task, seed, and policy. The `/evaluation_report` endpoint returns compact benchmark analytics across all tasks. The `/judge_pack` and `/showcase` endpoints are judge-facing helpers for fast inspection.
 
-## Quick start
+## Quick Start
 
 Local run:
 
@@ -143,7 +135,18 @@ pip install -e .
 python -m uvicorn app.main:app --host 0.0.0.0 --port 7860
 ```
 
+Docker run:
+
+```bash
+docker build -t incident-commander -f server/Dockerfile .
+docker run -p 7860:7860 incident-commander
+```
+
 Validation:
+
+```bash
+python -m openenv.cli validate
+```
 
 ```bash
 bash scripts/validate-submission.sh https://your-space.hf.space .
@@ -153,12 +156,6 @@ PowerShell:
 
 ```powershell
 ./scripts/validate-submission.ps1 -PingUrl "https://your-space.hf.space" -RepoDir "."
-```
-
-OpenEnv validation:
-
-```bash
-python -m openenv.cli validate
 ```
 
 Local smoke test:
@@ -174,6 +171,7 @@ Environment variables:
 - `API_BASE_URL`
 - `MODEL_NAME`
 - `HF_TOKEN`
+- `ENV_URL`
 - optional `LOCAL_IMAGE_NAME`
 
 The inference script uses the OpenAI client and emits strict `[START]`, `[STEP]`, and `[END]` log lines. If the model call is unavailable, it falls back to a deterministic heuristic controller instead of a noop policy.
@@ -198,7 +196,7 @@ $env:ENV_URL = "http://localhost:7860"
 python inference.py
 ```
 
-## Baseline behavior
+## Baseline Behavior
 
 Use the baseline comparison script to reproduce the policy table:
 
@@ -206,9 +204,9 @@ Use the baseline comparison script to reproduce the policy table:
 python greedy_baseline.py
 ```
 
-It prints a CSV-style summary across fixed seeds so judges can compare noop, reactive, and reasoning policies under the same episode distribution.
+It prints a summary across fixed seeds so judges can compare noop, reactive, and reasoning policies under the same episode distribution.
 
-## Submission checklist
+## Submission Checklist
 
 - HF Space responds at `/health`
 - `openenv.yaml` includes metadata and task definitions
@@ -223,15 +221,15 @@ For the full validator flow, use [PRE_SUBMISSION_CHECKLIST.md](PRE_SUBMISSION_CH
 
 The repository is Dockerized and ready for Hugging Face Spaces deployment with the `openenv` tag. The live Space URL is the submission target; the `huggingface.co/spaces/...` page is the repo view.
 
-## Notes for judges
+## Notes for Judges
 
 - The project focuses on a real operational domain: incident response for an AI platform.
 - The task ladder is deterministic and reproducible.
 - The API is designed to be inspectable, replayable, and easy to validate.
 - The benchmark exposes enough structure to compare policies meaningfully without requiring custom tooling.
-- The longhaul task adds a stronger delayed-credit signal without making the environment brittle.
+- The `longhaul` task adds a stronger delayed-credit signal without making the environment brittle.
 
-## Repository structure
+## Repository Structure
 
 ```text
 incident-commander/
