@@ -27,8 +27,6 @@ A CPU-only OpenEnv benchmark where an LLM agent acts as the incident commander f
 [![Docker](https://img.shields.io/badge/docker-required-informational)](https://www.docker.com/)
 [![GPU Not Required](https://img.shields.io/badge/GPU-not%20required-success)](https://meta-pytorch.org/OpenEnv/)
 
-Quick links: [Judge Guide](JUDGES_GUIDE.md) | [Submission Brief](HACKATHON_SUBMISSION_BRIEF.md) | [Pre-Submission Checklist](PRE_SUBMISSION_CHECKLIST.md)
-
 ## Overview
 
 Incident Commander models the on-call workflow for a small AI platform with three coupled services: `frontend`, `auth`, and `db`. Each episode is a black-box incident response problem. The agent observes the current state, inspects logs or metrics, takes a typed action, and tries to recover service without burning budget or causing avoidable escalation.
@@ -284,6 +282,7 @@ The repository is Dockerized and ready for Hugging Face Spaces deployment with t
 - The API is designed to be inspectable, replayable, and easy to validate.
 - The benchmark exposes enough structure to compare policies meaningfully without requiring custom tooling.
 - The `longhaul` task adds a stronger delayed-credit signal without making the environment brittle.
+- This repository intentionally keeps the documentation surface minimal so the README remains the source of truth.
 
 ## Troubleshooting
 
