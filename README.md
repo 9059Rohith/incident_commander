@@ -178,6 +178,8 @@ The main endpoints are:
 - `GET /metrics`
 - `GET /report`
 - `GET /governance_report`
+- `GET /chaos_drill`
+- `GET /championship_report`
 - `GET /visualize`
 - `GET /baseline`
 - `GET /benchmark_matrix`
@@ -195,6 +197,8 @@ Useful endpoint notes:
 - `/baseline` and `/benchmark_matrix` run the built-in baseline controller for quick comparison.
 - `/report` combines grade, metrics, and unresolved incident context in one payload.
 - `/governance_report` summarizes macro trust, legal, and misinformation stability.
+- `/chaos_drill` evaluates robustness under harsher scenario variants and reports resilience index.
+- `/championship_report` combines nominal, hidden, and chaos tracks into a single judge-facing championship score.
 - `/replay` and `/evaluation_report` are useful when you want deterministic inspection artifacts rather than a single score.
 - `/judge_pack` and `/showcase` are judge-facing inspection tools for fast review.
 

@@ -35,6 +35,8 @@ endpoints:
   baseline: /baseline
   report: /report
   governance_report: /governance_report
+  chaos_drill: /chaos_drill
+  championship_report: /championship_report
   benchmark_matrix: /benchmark_matrix
   replay: /replay
   evaluation_report: /evaluation_report

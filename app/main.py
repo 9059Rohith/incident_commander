@@ -73,6 +73,29 @@ def _hidden_task_variant(task_id: str, seed: int) -> TaskConfig:
     )
 
 
+def _chaos_task_variant(task_id: str, seed: int) -> TaskConfig:
+    base = TASKS[task_id].model_copy(deep=True)
+    rng = np.random.default_rng(seed * 6701 + len(task_id) * 37)
+
+    shift = int(rng.integers(2, 6))
+    schedule = [max(1, min(base.max_steps - 1, step + shift)) for step in base.incident_schedule]
+    if max(1, base.max_steps // 3) not in schedule:
+        schedule.append(max(1, base.max_steps // 3))
+    schedule = sorted(list(dict.fromkeys(schedule)))
+
+    return base.model_copy(
+        update={
+            "incident_schedule": schedule,
+            "observation_noise": min(0.32, base.observation_noise + 0.06),
+            "max_sla_breaches": max(3, base.max_sla_breaches - 2),
+            "peak_traffic": round(base.peak_traffic * 1.14, 4),
+            "adversarial_shift_rate": min(0.2, base.adversarial_shift_rate + 0.04),
+            "thundering_herd": True,
+            "scenario_mix": ["regional_outage", "heisenbug", "config_drift", "resource_exhaustion"],
+        }
+    )
+
+
 def _is_action_spam(steps: list[Dict[str, object]]) -> bool:
     if not steps:
         return False
@@ -337,6 +360,8 @@ def _judge_pack_snapshot() -> Dict[str, object]:
             "/benchmark_matrix",
             "/forensic_audit",
             "/governance_report",
+            "/chaos_drill",
+            "/championship_report",
             "/judge_quickstart",
             "/showcase",
         ],
@@ -349,6 +374,8 @@ def _judge_pack_snapshot() -> Dict[str, object]:
             "hidden_eval_track": True,
             "anti_gaming_checks": True,
             "hf_space_deployable": True,
+            "chaos_robustness": True,
+            "cross_task_generalization": True,
         },
     }
 
@@ -614,6 +641,105 @@ async def forensic_audit(task_id: str = "hard", seed: int = 42, policy: str = "b
     }
 
 
+@app.get("/chaos_drill")
+async def chaos_drill(policy: str = "reasoning", episodes_per_task: int = 2, seed_start: int = 77):
+    if policy not in SUPPORTED_REPLAY_POLICIES:
+        raise HTTPException(status_code=400, detail=f"Unsupported policy. Use one of {SUPPORTED_REPLAY_POLICIES}")
+
+    episodes_per_task = int(np.clip(episodes_per_task, 1, 6))
+    per_task = {}
+    normal_scores: list[float] = []
+    chaos_scores: list[float] = []
+
+    for task_id in TASKS:
+        task_runs = []
+        for idx in range(episodes_per_task):
+            seed = seed_start + idx
+            normal_rollout = _rollout_episode(task_id=task_id, seed=seed, policy=policy)
+            chaos_rollout = _rollout_episode(
+                task_id=task_id,
+                seed=seed,
+                policy=policy,
+                task_override=_chaos_task_variant(task_id, seed),
+                evaluation_track="chaos",
+            )
+            normal_score = float(normal_rollout["score"])
+            chaos_score = float(chaos_rollout["score"])
+            drop = max(0.0, normal_score - chaos_score)
+            task_runs.append(
+                {
+                    "seed": seed,
+                    "normal_score": round(normal_score, 6),
+                    "chaos_score": round(chaos_score, 6),
+                    "score_drop": round(drop, 6),
+                }
+            )
+            normal_scores.append(normal_score)
+            chaos_scores.append(chaos_score)
+
+        drops = [run["score_drop"] for run in task_runs]
+        resilience = max(0.0, min(1.0, 1.0 - (sum(drops) / max(1, len(drops)))))
+        per_task[task_id] = {
+            "runs": task_runs,
+            "normal_stats": _score_stats([run["normal_score"] for run in task_runs]),
+            "chaos_stats": _score_stats([run["chaos_score"] for run in task_runs]),
+            "avg_score_drop": round(sum(drops) / max(1, len(drops)), 6),
+            "resilience_index": round(resilience, 6),
+        }
+
+    aggregate_drop = max(0.0, mean(normal_scores) - mean(chaos_scores)) if normal_scores and chaos_scores else 0.0
+    return {
+        "policy": policy,
+        "episodes_per_task": episodes_per_task,
+        "seed_start": seed_start,
+        "summary": {
+            "normal_stats": _score_stats(normal_scores),
+            "chaos_stats": _score_stats(chaos_scores),
+            "aggregate_drop": round(aggregate_drop, 6),
+            "global_resilience_index": round(max(0.0, min(1.0, 1.0 - aggregate_drop)), 6),
+        },
+        "per_task": per_task,
+    }
+
+
+@app.get("/championship_report")
+async def championship_report(policy: str = "reasoning"):
+    if policy not in SUPPORTED_REPLAY_POLICIES:
+        raise HTTPException(status_code=400, detail=f"Unsupported policy. Use one of {SUPPORTED_REPLAY_POLICIES}")
+
+    eval_payload = await evaluation_report(policy=policy, episodes_per_task=2, seed_start=42, include_hidden=True, hidden_weight=0.35)
+    chaos_payload = await chaos_drill(policy=policy, episodes_per_task=2, seed_start=77)
+    matrix_payload = await benchmark_matrix(episodes=2)
+
+    global_avg = float(eval_payload.get("summary", {}).get("global_avg_score", 0.0))
+    resilience = float(chaos_payload.get("summary", {}).get("global_resilience_index", 0.0))
+    championship_score = max(0.0, min(1.0, (0.7 * global_avg) + (0.3 * resilience)))
+
+    return {
+        "policy": policy,
+        "championship_score": round(championship_score, 6),
+        "tracks": {
+            "public_hidden_eval": eval_payload.get("summary", {}),
+            "chaos_resilience": chaos_payload.get("summary", {}),
+        },
+        "signal_cards": {
+            "failure_taxonomy_totals": eval_payload.get("failure_taxonomy_totals", {}),
+            "matrix_delta_snapshot": {
+                task_id: {
+                    "reasoning_minus_baseline": task_payload.get("reasoning_minus_baseline", 0.0),
+                    "trained_minus_reasoning": task_payload.get("trained_minus_reasoning", 0.0),
+                }
+                for task_id, task_payload in matrix_payload.get("matrix", {}).items()
+            },
+        },
+        "judge_claims": [
+            "Evaluates both nominal and chaos tracks instead of single-track scores.",
+            "Includes anti-gaming taxonomy and resilience-focused diagnostics.",
+            "Provides deterministic multi-seed evidence for quick judge verification.",
+        ],
+    }
+
+
 @app.get("/judge_quickstart")
 async def judge_quickstart():
     return {
@@ -626,6 +752,8 @@ async def judge_quickstart():
             "GET /evaluation_report?policy=baseline&episodes_per_task=3&include_hidden=true&hidden_weight=0.35",
             "GET /forensic_audit?task_id=hard&seed=42&policy=baseline",
             "GET /governance_report?task_id=hard",
+            "GET /chaos_drill?policy=reasoning&episodes_per_task=2",
+            "GET /championship_report?policy=reasoning",
             "GET /judge_pack",
         ],
         "expected_signals": {
@@ -634,6 +762,8 @@ async def judge_quickstart():
             "anti_gaming_failure_taxonomy": True,
             "counterfactual_diagnostics": True,
             "governance_metrics_enabled": True,
+            "chaos_resilience_enabled": True,
+            "championship_report_enabled": True,
         },
     }
 

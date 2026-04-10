@@ -133,3 +133,20 @@ def test_governance_report_endpoint_exposes_macro_signals() -> None:
     assert "economic_stability" in signals
     assert "legal_risk" in signals
     assert "misinformation_index" in signals
+
+
+def test_chaos_and_championship_endpoints_exist() -> None:
+    client = TestClient(app)
+    chaos = client.get("/chaos_drill", params={"policy": "reasoning", "episodes_per_task": 1, "seed_start": 77})
+    champion = client.get("/championship_report", params={"policy": "reasoning"})
+
+    chaos.raise_for_status()
+    champion.raise_for_status()
+
+    chaos_payload = chaos.json()
+    champion_payload = champion.json()
+
+    assert "summary" in chaos_payload
+    assert "global_resilience_index" in chaos_payload["summary"]
+    assert "championship_score" in champion_payload
+    assert "judge_claims" in champion_payload
