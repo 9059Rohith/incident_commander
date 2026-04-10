@@ -35,6 +35,18 @@ Incident Commander models the on-call workflow for a small AI platform with thre
 
 The environment is designed to be deterministic under fixed seeds, easy to validate locally and in CI, compatible with Hugging Face Spaces and Docker, and transparent enough for judges to inspect replays, reports, and baseline comparisons.
 
+At a practical level, each episode is a short incident drill. You reset the environment, read the observation payload, choose a single action, and repeat until the task ends. The value of the benchmark comes from the fact that the right action is not always the obvious one: sometimes you should inspect first, sometimes you should remediate immediately, and sometimes you should recover one service so that another can be fixed safely.
+
+## Platform Model
+
+The simulated platform is intentionally small, but the coupling between services makes the decision space realistic:
+
+- `frontend` is the customer-facing entry point and usually where symptoms appear first.
+- `auth` handles identity and token validation, so failures there can look like downstream API issues.
+- `db` is the persistence layer, and problems there often surface as retries, latency spikes, or cascading errors.
+
+The agent does not get a fully narrated answer. It gets structured telemetry, masked incident context, and recent action history. That means the policy has to infer root cause from symptoms instead of reading a label that gives the answer away.
+
 ## Tasks
 
 The project ships with five canonical tasks and deterministic graders:
@@ -49,6 +61,14 @@ The project ships with five canonical tasks and deterministic graders:
 
 All task scores are normalized to `[0.0, 1.0]`, and the success threshold is `0.5`.
 
+The tasks are intentionally not equivalent in how they reward action:
+
+- `easy` is mostly a contract check. It verifies that the environment, action model, and grader wiring are working.
+- `medium` introduces recovery sequencing and makes it important to inspect before acting.
+- `hard` adds more mixed failure modes, so the policy has to balance throughput, verification, and cost.
+- `longhaul` rewards policies that keep working over a longer horizon instead of optimizing only the current observation.
+- `blackout` is the strongest stress test, with prolonged pressure and a bigger need for disciplined remediation.
+
 ## Control Loop
 
 The environment follows a simple but operationally realistic loop:
@@ -59,6 +79,22 @@ The environment follows a simple but operationally realistic loop:
 4. Apply the action with `/step`.
 5. Monitor state, reward, and incident progress.
 6. Finish when the episode ends, the task is recovered, or a failure condition is reached.
+
+The environment is stateful across steps inside one episode. Actions can change the current service state, and the next observation reflects those changes. That is why the benchmark is useful for policy evaluation: it measures whether a controller can build on its earlier decisions instead of treating every step as isolated.
+
+### Example Interaction
+
+The API is designed to be easy to call from a script or agent loop:
+
+```bash
+curl -X POST "http://localhost:7860/reset?task_id=easy&seed=42"
+curl -X POST "http://localhost:7860/step?task_id=easy" \
+  -H "Content-Type: application/json" \
+  -d '{"action_type":"get_metrics","target_service":"frontend","delta_instances":0,"fallback_service":null,"config_key":null,"config_value":null,"n_lines":0,"question":null,"note":"inspect first"}'
+curl "http://localhost:7860/grade?task_id=easy"
+```
+
+The exact action schema is defined by `app/models.py`, and the environment rejects invalid combinations instead of silently accepting them.
 
 ### Observation Space
 
@@ -98,11 +134,15 @@ The environment supports these actions:
 | `run_command` | Simulated operational command |
 | `noop` | Do nothing |
 
+The environment also exposes a `visualize` endpoint that returns a compact ASCII dashboard for quick manual inspection. That makes it easier to compare the current service state against the task description during debugging.
+
 ## Reward and Grading
 
 Reward is dense and inspectable. It combines uptime, latency, SLA compliance, cost, recovery, MTTR bonus, burn-budget penalty, anti-panic penalty, and safety penalties.
 
 Each task has a deterministic grader in `server.tasks` that returns a score in `[0.0, 1.0]` and rewards partial progress instead of only binary success.
+
+The grader is intentionally shaped to reward practical incident response, not just raw throughput. A policy that restores service but does so carelessly, noisily, or wastefully will generally score worse than one that stabilizes the system with fewer unnecessary interventions.
 
 ## API Surface
 
@@ -125,6 +165,16 @@ The main endpoints are:
 - `GET /showcase`
 
 The `/metrics` endpoint supports `include_trace=true|false`. The `/replay` endpoint exports a deterministic full trajectory for a fixed task, seed, and policy. The `/evaluation_report` endpoint returns compact benchmark analytics across all tasks. The `/judge_pack` and `/showcase` endpoints are judge-facing helpers for fast inspection.
+
+Useful endpoint notes:
+
+- `/reset` initializes a task context and returns the first observation.
+- `/step` applies exactly one action to the active task context.
+- `/state` returns the current state without advancing the episode.
+- `/grade` evaluates the current episode state with the task-specific grader.
+- `/baseline` and `/benchmark_matrix` run the built-in baseline controller for quick comparison.
+- `/report` combines grade, metrics, and unresolved incident context in one payload.
+- `/replay` and `/evaluation_report` are useful when you want deterministic inspection artifacts rather than a single score.
 
 ## Quick Start
 
@@ -164,6 +214,8 @@ Local smoke test:
 python scripts/test-local.py
 ```
 
+If you are validating a submission bundle, run the local smoke test first, then the OpenEnv validator, then the submission-specific validator script. That sequence catches most environment and API mismatch issues before you try to deploy.
+
 ## Inference
 
 Environment variables:
@@ -175,6 +227,8 @@ Environment variables:
 - optional `LOCAL_IMAGE_NAME`
 
 The inference script uses the OpenAI client and emits strict `[START]`, `[STEP]`, and `[END]` log lines. If the model call is unavailable, it falls back to a deterministic heuristic controller instead of a noop policy.
+
+This fallback is deliberate. It keeps the script usable in restricted environments and gives judges something meaningful to compare against even when an external LLM is not available.
 
 Linux/macOS:
 
@@ -206,6 +260,8 @@ python greedy_baseline.py
 
 It prints a summary across fixed seeds so judges can compare noop, reactive, and reasoning policies under the same episode distribution.
 
+For quick sanity checks, the built-in baseline is the fastest way to confirm that task wiring, grading, and episode transitions still behave as expected after a change.
+
 ## Submission Checklist
 
 - HF Space responds at `/health`
@@ -228,6 +284,22 @@ The repository is Dockerized and ready for Hugging Face Spaces deployment with t
 - The API is designed to be inspectable, replayable, and easy to validate.
 - The benchmark exposes enough structure to compare policies meaningfully without requiring custom tooling.
 - The `longhaul` task adds a stronger delayed-credit signal without making the environment brittle.
+
+## Troubleshooting
+
+If something looks off during local testing, these checks usually find the issue quickly:
+
+- Confirm the server is running on port `7860` before calling `/reset` or `/step`.
+- Make sure you are using `task_id`, not `task_name`, when calling the API.
+- If `/grade` fails, reset the episode again and replay the same task from a clean state.
+- If the inference script falls back to heuristics, verify that `HF_TOKEN` and `API_BASE_URL` are set.
+- If the validator complains about endpoint coverage, check `app/main.py` and `scripts/test-local.py` for the expected contract.
+
+## Development Notes
+
+The repository keeps the main implementation in `app/` and the grader logic in `server/tasks.py`. That separation is intentional: it keeps the environment mechanics close to the action model, while the task scoring stays easy to inspect.
+
+If you change the environment behavior, update the README, the validator expectations, and any smoke tests that encode the public contract. That keeps the documentation, runtime behavior, and evaluation flow aligned.
 
 ## Repository Structure
 
