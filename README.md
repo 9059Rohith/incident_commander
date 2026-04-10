@@ -197,10 +197,33 @@ Incident Commander is built to be auditable, not just scoreable.
 - Use `/metrics?include_trace=true` to inspect step-by-step reward decomposition.
 - Use `/visualize` for a compact operator dashboard view of current state.
 - Use `/replay` for deterministic trajectory exports by task, seed, and policy.
-- Use `/evaluation_report` for aggregate benchmarking across tasks.
+- Use `/evaluation_report` for aggregate benchmarking across tasks with public+hidden weighted scoring.
 - Use `/judge_pack` for a one-call evaluation snapshot.
 
 For a fast live walkthrough, follow [DEMOSCRIPT.md](DEMOSCRIPT.md).
+
+## Hidden Evaluation Track
+
+Incident Commander now supports a hidden-track evaluation mode inside `/evaluation_report`:
+
+- `include_hidden=true` runs private harder variants (shifted shock schedules and increased observation noise).
+- Hidden tasks are not exposed in `/tasks` and are intended for anti-overfitting checks.
+- Final aggregate can be weighted via `hidden_weight`.
+
+Example:
+
+```bash
+curl "http://127.0.0.1:7860/evaluation_report?policy=reasoning&episodes_per_task=5&seed_start=42&include_hidden=true&hidden_weight=0.35"
+```
+
+## Anti-Gaming Safeguards
+
+Failure taxonomy now includes anti-gaming detection in evaluation outputs:
+
+- `action_spam_failure` flags repetitive action loops with poor outcomes.
+- Existing failure dimensions (`sla_failure`, `budget_failure`, `low_score_failure`) remain tracked.
+
+This prevents high scores from brittle or degenerate action policies.
 
 ## Why It Is Stronger Than a Simple Scheduling Benchmark
 
@@ -301,6 +324,12 @@ python greedy_baseline.py
 It prints a summary across fixed seeds so judges can compare noop, reactive, and reasoning policies under the same episode distribution.
 
 For quick sanity checks, the built-in baseline is the fastest way to confirm that task wiring, grading, and episode transitions still behave as expected after a change.
+
+For statistically robust baseline comparisons with confidence intervals:
+
+```bash
+python scripts/eval_baselines.py
+```
 
 ## Submission Checklist
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from math import sqrt
 from statistics import mean, pstdev
 from typing import Dict
 
@@ -8,7 +9,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 
 from .env import IncidentCommanderEnv, TASKS
-from .models import IncidentCommanderAction
+from .models import IncidentCommanderAction, TaskConfig
 from server.tasks import GRADERS
 
 app = FastAPI(title="Incident Commander OpenEnv", version="1.0.0")
@@ -23,6 +24,64 @@ TASK_DESCRIPTIONS = {
 }
 
 SUPPORTED_REPLAY_POLICIES = ["baseline", "noop", "reasoning"]
+
+
+def _score_stats(scores: list[float]) -> Dict[str, float]:
+    if not scores:
+        return {
+            "avg": 0.0,
+            "min": 0.0,
+            "max": 0.0,
+            "std_dev": 0.0,
+            "ci95_low": 0.0,
+            "ci95_high": 0.0,
+        }
+    avg = mean(scores)
+    std = pstdev(scores) if len(scores) > 1 else 0.0
+    margin = 1.96 * (std / sqrt(max(1, len(scores))))
+    return {
+        "avg": round(float(avg), 6),
+        "min": round(float(min(scores)), 6),
+        "max": round(float(max(scores)), 6),
+        "std_dev": round(float(std), 6),
+        "ci95_low": round(float(max(0.0, avg - margin)), 6),
+        "ci95_high": round(float(min(1.0, avg + margin)), 6),
+    }
+
+
+def _hidden_task_variant(task_id: str, seed: int) -> TaskConfig:
+    base = TASKS[task_id].model_copy(deep=True)
+    rng = np.random.default_rng(seed * 7919 + len(task_id) * 101)
+
+    shift = int(rng.integers(1, 4))
+    schedule = [max(1, min(base.max_steps - 1, step + shift)) for step in base.incident_schedule]
+    schedule = sorted(list(dict.fromkeys(schedule)))
+
+    harder_noise = min(0.25, base.observation_noise + 0.03)
+    harder_sla_cap = max(3, base.max_sla_breaches - 1)
+    harder_traffic = round(base.peak_traffic * 1.08, 4)
+    rotated_mix = base.scenario_mix[1:] + base.scenario_mix[:1] if base.scenario_mix else base.scenario_mix
+
+    return base.model_copy(
+        update={
+            "incident_schedule": schedule,
+            "observation_noise": harder_noise,
+            "max_sla_breaches": harder_sla_cap,
+            "peak_traffic": harder_traffic,
+            "scenario_mix": rotated_mix,
+        }
+    )
+
+
+def _is_action_spam(steps: list[Dict[str, object]]) -> bool:
+    if not steps:
+        return False
+    action_types = [str(step.get("action", {}).get("action_type", "noop")) for step in steps]
+    if not action_types:
+        return False
+    top_action = max(set(action_types), key=action_types.count)
+    top_ratio = action_types.count(top_action) / len(action_types)
+    return top_ratio >= 0.72 and len(action_types) >= 8
 
 
 def _get_env(task_id: str) -> IncidentCommanderEnv:
@@ -126,16 +185,26 @@ def _policy_action(policy: str, observation: dict) -> IncidentCommanderAction:
     return _baseline_action(observation)
 
 
-def _extract_failure_taxonomy(episode_details: dict, final_score: float) -> Dict[str, bool]:
+def _extract_failure_taxonomy(episode_details: dict, final_score: float, steps: list[Dict[str, object]]) -> Dict[str, bool]:
+    action_spam_failure = _is_action_spam(steps) and final_score < 0.6
     return {
         "sla_failure": bool(episode_details.get("ended_by_sla_failure", False)),
         "budget_failure": bool(episode_details.get("ended_by_budget_failure", False)),
         "low_score_failure": final_score < 0.5,
+        "action_spam_failure": action_spam_failure,
     }
 
 
-def _rollout_episode(task_id: str, seed: int, policy: str, max_steps: int | None = None) -> Dict[str, object]:
-    env = IncidentCommanderEnv(TASKS[task_id], seed=seed)
+def _rollout_episode(
+    task_id: str,
+    seed: int,
+    policy: str,
+    max_steps: int | None = None,
+    task_override: TaskConfig | None = None,
+    evaluation_track: str = "public",
+) -> Dict[str, object]:
+    env_task = task_override or TASKS[task_id]
+    env = IncidentCommanderEnv(env_task, seed=seed)
     observation = env.reset(seed=seed)
     step_limit = env.task.max_steps if max_steps is None else int(np.clip(max_steps, 1, env.task.max_steps))
     steps = []
@@ -165,7 +234,7 @@ def _rollout_episode(task_id: str, seed: int, policy: str, max_steps: int | None
     score = float(GRADERS[task_id](episode_result))
     details = episode_result.model_dump()
     metrics_payload = env.get_metrics()
-    failure_taxonomy = _extract_failure_taxonomy(details, score)
+    failure_taxonomy = _extract_failure_taxonomy(details, score, steps)
 
     return {
         "task_id": task_id,
@@ -173,6 +242,7 @@ def _rollout_episode(task_id: str, seed: int, policy: str, max_steps: int | None
         "policy": policy,
         "steps": steps,
         "score": round(score, 6),
+        "evaluation_track": evaluation_track,
         "episode_details": details,
         "metrics": metrics_payload,
         "failure_taxonomy": failure_taxonomy,
@@ -206,6 +276,8 @@ def _judge_pack_snapshot() -> Dict[str, object]:
             "task_granularity": "easy->blackout",
             "reward_trace_available": True,
             "baseline_comparison": True,
+            "hidden_eval_track": True,
+            "anti_gaming_checks": True,
             "hf_space_deployable": True,
         },
     }
@@ -379,25 +451,27 @@ async def baseline(task_id: str = "easy", episodes: int = 5):
 
 @app.get("/benchmark_matrix")
 async def benchmark_matrix(episodes: int = 3):
-    episodes = int(np.clip(episodes, 1, 10))
+    episodes = int(np.clip(episodes, 1, 30))
     results = {}
+    policies = ["noop", "baseline", "reasoning"]
     for task_id in TASKS:
-        scores = []
-        for index in range(episodes):
-            seed = 101 + index
-            env = IncidentCommanderEnv(TASKS[task_id], seed=seed)
-            obs = env.reset(seed=seed)
-            while not env.done:
-                action = _baseline_action(obs.model_dump())
-                obs, _, done, _ = env.step(action)
-                if done:
-                    break
-            scores.append(float(GRADERS[task_id](env.build_episode_result())))
+        by_policy: Dict[str, Dict[str, object]] = {}
+        policy_scores: Dict[str, list[float]] = {name: [] for name in policies}
+        for policy in policies:
+            for index in range(episodes):
+                seed = 101 + index
+                rollout = _rollout_episode(task_id=task_id, seed=seed, policy=policy)
+                policy_scores[policy].append(float(rollout["score"]))
+            stats = _score_stats(policy_scores[policy])
+            by_policy[policy] = {
+                **stats,
+                "scores": [round(v, 4) for v in policy_scores[policy]],
+            }
+
         results[task_id] = {
-            "avg": round(float(np.mean(scores)), 4),
-            "min": round(float(np.min(scores)), 4),
-            "max": round(float(np.max(scores)), 4),
-            "scores": [round(float(v), 4) for v in scores],
+            "policies": by_policy,
+            "reasoning_minus_baseline": round(by_policy["reasoning"]["avg"] - by_policy["baseline"]["avg"], 6),
+            "baseline_minus_noop": round(by_policy["baseline"]["avg"] - by_policy["noop"]["avg"], 6),
         }
     return {"episodes": episodes, "matrix": results}
 
@@ -585,76 +659,120 @@ async def replay(task_id: str = "easy", seed: int = 42, policy: str = "baseline"
 
 
 @app.get("/evaluation_report")
-async def evaluation_report(policy: str = "baseline", episodes_per_task: int = 3, seed_start: int = 42):
+async def evaluation_report(
+    policy: str = "baseline",
+    episodes_per_task: int = 3,
+    seed_start: int = 42,
+    include_hidden: bool = True,
+    hidden_weight: float = 0.35,
+):
     if policy not in SUPPORTED_REPLAY_POLICIES:
         raise HTTPException(status_code=400, detail=f"Unsupported policy. Use one of {SUPPORTED_REPLAY_POLICIES}")
 
     episodes_per_task = int(np.clip(episodes_per_task, 1, 10))
     seed_start = int(seed_start)
+    hidden_weight = float(np.clip(hidden_weight, 0.0, 0.8))
+    public_weight = 1.0 - hidden_weight
     per_task = {}
-    all_scores = []
+    all_public_scores = []
+    all_hidden_scores = []
     failure_totals = {
         "sla_failure": 0,
         "budget_failure": 0,
         "low_score_failure": 0,
+        "action_spam_failure": 0,
     }
 
     for task_id in TASKS:
-        task_scores = []
+        task_public_scores = []
+        task_hidden_scores = []
         task_failure_counts = {
             "sla_failure": 0,
             "budget_failure": 0,
             "low_score_failure": 0,
+            "action_spam_failure": 0,
         }
         seed_runs = []
 
         for idx in range(episodes_per_task):
             seed = seed_start + idx
-            rollout = _rollout_episode(task_id=task_id, seed=seed, policy=policy)
-            score = float(rollout["score"])
-            task_scores.append(score)
-            all_scores.append(score)
+            public_rollout = _rollout_episode(task_id=task_id, seed=seed, policy=policy, evaluation_track="public")
+            public_score = float(public_rollout["score"])
+            task_public_scores.append(public_score)
+            all_public_scores.append(public_score)
 
-            ft = rollout["failure_taxonomy"]
+            hidden_score = None
+            if include_hidden:
+                hidden_task = _hidden_task_variant(task_id, seed)
+                hidden_rollout = _rollout_episode(
+                    task_id=task_id,
+                    seed=seed,
+                    policy=policy,
+                    task_override=hidden_task,
+                    evaluation_track="hidden",
+                )
+                hidden_score = float(hidden_rollout["score"])
+                task_hidden_scores.append(hidden_score)
+                all_hidden_scores.append(hidden_score)
+
+            ft = public_rollout["failure_taxonomy"]
             for key in task_failure_counts:
                 if ft.get(key, False):
                     task_failure_counts[key] += 1
                     failure_totals[key] += 1
 
+            combined_score = public_score
+            if hidden_score is not None:
+                combined_score = (public_weight * public_score) + (hidden_weight * hidden_score)
+
             seed_runs.append(
                 {
                     "seed": seed,
-                    "score": round(score, 6),
+                    "public_score": round(public_score, 6),
+                    "hidden_score": round(hidden_score, 6) if hidden_score is not None else None,
+                    "combined_score": round(combined_score, 6),
                     "failure_taxonomy": ft,
-                    "step_count": len(rollout.get("steps", [])),
+                    "step_count": len(public_rollout.get("steps", [])),
                 }
             )
 
-        task_avg = mean(task_scores)
-        task_std = pstdev(task_scores) if len(task_scores) > 1 else 0.0
+        task_combined_scores = [run["combined_score"] for run in seed_runs]
+        task_avg = mean(task_combined_scores)
+        task_std = pstdev(task_combined_scores) if len(task_combined_scores) > 1 else 0.0
         robustness = max(0.0, min(1.0, 1.0 - min(1.0, task_std)))
         per_task[task_id] = {
+            "public_stats": _score_stats(task_public_scores),
+            "hidden_stats": _score_stats(task_hidden_scores) if include_hidden else None,
+            "combined_stats": _score_stats(task_combined_scores),
             "avg_score": round(task_avg, 6),
-            "min_score": round(min(task_scores), 6),
-            "max_score": round(max(task_scores), 6),
+            "min_score": round(min(task_combined_scores), 6),
+            "max_score": round(max(task_combined_scores), 6),
             "std_dev": round(task_std, 6),
             "robustness_score": round(robustness, 6),
             "failure_taxonomy": task_failure_counts,
             "seed_runs": seed_runs,
         }
 
-    global_avg = mean(all_scores) if all_scores else 0.0
-    global_std = pstdev(all_scores) if len(all_scores) > 1 else 0.0
+    all_combined_scores = []
+    for task_data in per_task.values():
+        all_combined_scores.extend([float(run["combined_score"]) for run in task_data["seed_runs"]])
+
+    global_avg = mean(all_combined_scores) if all_combined_scores else 0.0
+    global_std = pstdev(all_combined_scores) if len(all_combined_scores) > 1 else 0.0
     overall_robustness = max(0.0, min(1.0, 1.0 - min(1.0, global_std)))
 
     return {
         "policy": policy,
         "episodes_per_task": episodes_per_task,
         "seed_start": seed_start,
+        "include_hidden": include_hidden,
+        "weights": {"public": round(public_weight, 4), "hidden": round(hidden_weight, 4)},
         "summary": {
             "global_avg_score": round(global_avg, 6),
             "global_std_dev": round(global_std, 6),
             "overall_robustness_score": round(overall_robustness, 6),
+            "public_global_stats": _score_stats(all_public_scores),
+            "hidden_global_stats": _score_stats(all_hidden_scores) if include_hidden else None,
         },
         "failure_taxonomy_totals": failure_totals,
         "per_task": per_task,
