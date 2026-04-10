@@ -58,6 +58,13 @@ class ScenarioState(BaseModel):
     db_failover_complete: bool = False
 
 
+class EmergencyUnitState(BaseModel):
+    unit_type: Literal["fire", "police", "medical", "drone", "evacuation"]
+    available: int = 0
+    deployed: int = 0
+    cooldown_steps: int = 0
+
+
 class IncidentCommanderObservation(BaseModel):
     services: Dict[str, ServiceState]
     active_incidents: List[ActiveIncident]
@@ -76,6 +83,13 @@ class IncidentCommanderObservation(BaseModel):
     live_timeline: List[str] = Field(default_factory=list)
     available_actions: List[str] = Field(default_factory=list)
     scenario_hint: Optional[str] = None
+    incident_type: str = "infra_outage"
+    incident_severity: float = 0.0
+    weather_condition: str = "clear"
+    civilian_risk: float = 0.0
+    emergency_units: Dict[str, EmergencyUnitState] = Field(default_factory=dict)
+    strategic_options: List[str] = Field(default_factory=list)
+    tactical_options: List[str] = Field(default_factory=list)
 
 
 class IncidentCommanderAction(BaseModel):
@@ -98,6 +112,14 @@ class IncidentCommanderAction(BaseModel):
         "rollback_deploy",
         "quarantine_service",
         "page_human",
+        "declare_emergency",
+        "allocate_resources",
+        "request_national_support",
+        "dispatch_fire_truck",
+        "send_medical_team",
+        "deploy_drone_scan",
+        "evacuate_zone",
+        "request_backup",
         "noop",
     ]
     target_service: Optional[str] = None
@@ -111,6 +133,10 @@ class IncidentCommanderAction(BaseModel):
     question: Optional[str] = None
     command: Optional[str] = None
     note: Optional[str] = None
+    unit_type: Optional[Literal["fire", "police", "medical", "drone", "evacuation"]] = None
+    target_zone: Optional[str] = None
+    priority: Optional[Literal["low", "medium", "high", "critical"]] = None
+    strategy_level: Optional[Literal["strategic", "tactical"]] = None
 
 
 class IncidentCommanderReward(BaseModel):
@@ -127,6 +153,9 @@ class IncidentCommanderReward(BaseModel):
     resource_waste_penalty: float = 0.0
     incorrect_action_penalty: float = 0.0
     safety_penalty: float = 0.0
+    civilians_saved_bonus: float = 0.0
+    delayed_response_penalty: float = 0.0
+    wrong_dispatch_penalty: float = 0.0
 
 
 class TaskConfig(BaseModel):

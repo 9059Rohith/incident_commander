@@ -190,6 +190,18 @@ Useful endpoint notes:
 - `/replay` and `/evaluation_report` are useful when you want deterministic inspection artifacts rather than a single score.
 - `/judge_pack` and `/showcase` are judge-facing inspection tools for fast review.
 
+## Judge Auditability
+
+Incident Commander is built to be auditable, not just scoreable.
+
+- Use `/metrics?include_trace=true` to inspect step-by-step reward decomposition.
+- Use `/visualize` for a compact operator dashboard view of current state.
+- Use `/replay` for deterministic trajectory exports by task, seed, and policy.
+- Use `/evaluation_report` for aggregate benchmarking across tasks.
+- Use `/judge_pack` for a one-call evaluation snapshot.
+
+For a fast live walkthrough, follow [DEMOSCRIPT.md](DEMOSCRIPT.md).
+
 ## Why It Is Stronger Than a Simple Scheduling Benchmark
 
 Incident Commander is not trying to model hardware placement or resource packing. It models a human operational loop: diagnose, prioritize, remediate, verify, and explain.
@@ -329,6 +341,7 @@ If you change the environment behavior, update the README, the validator expecta
 ```text
 incident-commander/
 ├── Dockerfile
+├── DEMOSCRIPT.md
 ├── README.md
 ├── inference.py
 ├── greedy_baseline.py

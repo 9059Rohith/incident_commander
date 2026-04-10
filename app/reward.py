@@ -28,6 +28,10 @@ class RewardCalculator:
         investigation_coverage: float,
         steps_taken: int,
         ideal_steps: int,
+        civilians_saved: int,
+        civilian_risk: float,
+        delayed_response_steps: int,
+        wrong_dispatches: int,
     ) -> IncidentCommanderReward:
         uptime = max(0.0, min(1.0, uptime_ratio))
         latency = max(0.0, min(1.0, 1.0 - obs.p95_latency / 700.0))
@@ -41,6 +45,9 @@ class RewardCalculator:
         resource_waste_penalty = max(0.0, min(0.35, max(0.0, cost_ratio - 1.0) * 0.30))
         incorrect_action_penalty = 0.14 if incorrect_action else 0.0
         safety_penalty = 0.55 if unsafe_action else 0.0
+        civilians_saved_bonus = max(0.0, min(0.25, 0.015 * civilians_saved))
+        delayed_response_penalty = max(0.0, min(0.20, 0.01 * delayed_response_steps + 0.08 * civilian_risk))
+        wrong_dispatch_penalty = max(0.0, min(0.20, 0.06 * wrong_dispatches))
 
         total = success - latency_penalty - resource_waste_penalty - incorrect_action_penalty - safety_penalty
         if action.action_type == "noop" and unresolved_critical > 0:
@@ -78,8 +85,11 @@ class RewardCalculator:
             total -= 0.18
 
         total += mttr_bonus
+        total += civilians_saved_bonus
         total -= burn_budget_penalty
         total -= anti_panic_penalty
+        total -= delayed_response_penalty
+        total -= wrong_dispatch_penalty
 
         total = max(0.0, min(1.0, total))
         return IncidentCommanderReward(
@@ -96,4 +106,7 @@ class RewardCalculator:
             resource_waste_penalty=round(resource_waste_penalty, 4),
             incorrect_action_penalty=round(incorrect_action_penalty, 4),
             safety_penalty=round(safety_penalty, 4),
+            civilians_saved_bonus=round(civilians_saved_bonus, 4),
+            delayed_response_penalty=round(delayed_response_penalty, 4),
+            wrong_dispatch_penalty=round(wrong_dispatch_penalty, 4),
         )

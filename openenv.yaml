@@ -6,7 +6,8 @@ colorTo: gray
 sdk: docker
 description: >
   Incident Commander OpenEnv where an LLM agent performs black-box SRE
-  investigation and recovery across a stateful frontend-auth-db cluster.
+  investigation and multi-unit emergency coordination across a stateful
+  frontend-auth-db crisis simulation.
 author: Rohith Kumar
 observation_space:
   type: text
@@ -17,8 +18,9 @@ observation_space:
 action_space:
   type: structured
   description: >
-    Structured SRE tool actions: inspect, remediate, verify, fail over, and
-    communicate under reliability and budget constraints.
+    Structured strategic+tactical actions: inspect, remediate, verify, fail
+    over, dispatch emergency units, and coordinate escalation under
+    reliability and budget constraints.
 
 endpoints:
   health: /health
@@ -32,6 +34,10 @@ endpoints:
   baseline: /baseline
   report: /report
   benchmark_matrix: /benchmark_matrix
+  replay: /replay
+  evaluation_report: /evaluation_report
+  judge_pack: /judge_pack
+  showcase: /showcase
 tags:
   - openenv
   - reinforcement-learning

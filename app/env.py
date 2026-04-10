@@ -7,6 +7,7 @@ import numpy as np
 
 from .models import (
     ActiveIncident,
+    EmergencyUnitState,
     EpisodeResult,
     IncidentCommanderAction,
     IncidentCommanderObservation,
@@ -86,6 +87,7 @@ class IncidentCommanderEnv:
         self.reward_calculator = RewardCalculator(task)
 
         self.services: Dict[str, ServiceState] = {}
+        self.emergency_units: Dict[str, EmergencyUnitState] = {}
         self.active_incidents: List[ActiveIncident] = []
         self.scenario = ScenarioState(scenario_id="resource_exhaustion")
 
@@ -127,6 +129,15 @@ class IncidentCommanderEnv:
         self.dev_hint_cooldown = 0
         self.load_test_active_steps = 0
         self.open_sockets = 0
+        self.declared_emergency = False
+        self.civilian_risk = 0.22
+        self.incident_severity = 0.30
+        self.incident_type = "infra_outage"
+        self.weather_condition = "clear"
+        self.civilians_saved = 0
+        self.wrong_dispatches = 0
+        self.delayed_response_steps = 0
+        self.recent_dispatch_effect = 0.0
 
         self.last_observed_metrics: Dict[str, Tuple[Optional[float], Optional[float]]] = {}
 
@@ -149,6 +160,13 @@ class IncidentCommanderEnv:
         self.services["db"].reachable_upstreams = []
 
         self.active_incidents = []
+        self.emergency_units = {
+            "fire": EmergencyUnitState(unit_type="fire", available=2, deployed=0),
+            "police": EmergencyUnitState(unit_type="police", available=2, deployed=0),
+            "medical": EmergencyUnitState(unit_type="medical", available=2, deployed=0),
+            "drone": EmergencyUnitState(unit_type="drone", available=3, deployed=0),
+            "evacuation": EmergencyUnitState(unit_type="evacuation", available=2, deployed=0),
+        }
         self.timestep = 0
         self.done = False
         self.phase = "steady"
@@ -179,6 +197,15 @@ class IncidentCommanderEnv:
         self.dev_hint_cooldown = 0
         self.load_test_active_steps = 0
         self.open_sockets = 0
+        self.declared_emergency = False
+        self.civilian_risk = 0.22
+        self.incident_severity = 0.30
+        self.incident_type = "infra_outage"
+        self.weather_condition = "clear"
+        self.civilians_saved = 0
+        self.wrong_dispatches = 0
+        self.delayed_response_steps = 0
+        self.recent_dispatch_effect = 0.0
         self.last_observed_metrics = {}
 
         self.action_counts = defaultdict(int)
@@ -199,6 +226,7 @@ class IncidentCommanderEnv:
         self._init_state()
         self._append_timeline("Environment reset; ephemeral filesystem restored")
         self._append_timeline(f"Scenario seeded: {self.scenario.scenario_id}")
+        self._append_timeline("Emergency units standing by: fire, police, medical, drone, evacuation")
         return self._get_observation()
 
     def step(self, action: IncidentCommanderAction):
@@ -227,6 +255,7 @@ class IncidentCommanderEnv:
         self._inject_scheduled_incident_event()
 
         self._simulate_scenario_drift()
+        self._simulate_disaster_progression()
 
         traffic_profile = self._current_traffic_profile()
         service_loads, uptime_ratio, p95_latency, cost_per_step = self._simulate_traffic(traffic_profile)
@@ -238,6 +267,8 @@ class IncidentCommanderEnv:
 
         self._update_incidents()
         unresolved_critical = sum(1 for i in self.active_incidents if not i.resolved and i.severity == "critical")
+        if unresolved_critical > 0:
+            self.delayed_response_steps += 1
         contradictory_action = self._is_contradictory_action(clean_action, incorrect_action, unresolved_critical_before)
 
         self.sla_breaches += self._sla_breaches_this_step(p95_latency, traffic_profile)
@@ -277,6 +308,10 @@ class IncidentCommanderEnv:
             investigation_coverage=investigation_coverage,
             steps_taken=self.timestep + 1,
             ideal_steps=3,
+            civilians_saved=self.civilians_saved,
+            civilian_risk=self.civilian_risk,
+            delayed_response_steps=self.delayed_response_steps,
+            wrong_dispatches=self.wrong_dispatches,
         )
 
         self.last_reward = reward
@@ -297,6 +332,9 @@ class IncidentCommanderEnv:
                 "sla_breaches": self.sla_breaches,
                 "reward": reward.model_dump(),
                 "investigation_coverage": round(investigation_coverage, 4),
+                "civilian_risk": round(self.civilian_risk, 4),
+                "incident_severity": round(self.incident_severity, 4),
+                "civilians_saved": self.civilians_saved,
             }
         )
         self.action_history.append((self.timestep, clean_action.action_type, clean_action.target_service))
@@ -345,6 +383,10 @@ class IncidentCommanderEnv:
             question=action.question,
             command=action.command,
             note=action.note,
+            unit_type=action.unit_type,
+            target_zone=action.target_zone,
+            priority=action.priority,
+            strategy_level=action.strategy_level,
         )
 
     def _is_unsafe_action(self, action: IncidentCommanderAction) -> bool:
@@ -358,6 +400,65 @@ class IncidentCommanderEnv:
 
     def _apply_action(self, action: IncidentCommanderAction) -> Tuple[str, str, bool]:
         mapped = self._map_legacy_action(action)
+
+        if mapped.action_type == "declare_emergency":
+            self.declared_emergency = True
+            self.incident_severity = float(np.clip(self.incident_severity + 0.04, 0.0, 1.0))
+            self._append_timeline("Strategic action: emergency state declared")
+            return "emergency declared and command mode enabled", "declare_emergency", False
+
+        if mapped.action_type == "allocate_resources":
+            self.recent_dispatch_effect += 0.05
+            self._append_timeline("Strategic action: cross-service resource allocation applied")
+            return "resource allocation rebalanced", "allocate_resources", False
+
+        if mapped.action_type == "request_national_support":
+            for unit in self.emergency_units.values():
+                unit.available += 1
+            self.recent_dispatch_effect += 0.08
+            self._append_timeline("Strategic action: external support requested")
+            return "national support requested; reserve units added", "request_national_support", False
+
+        if mapped.action_type in {"dispatch_fire_truck", "send_medical_team", "deploy_drone_scan", "evacuate_zone", "request_backup"}:
+            dispatch_map = {
+                "dispatch_fire_truck": "fire",
+                "send_medical_team": "medical",
+                "deploy_drone_scan": "drone",
+                "evacuate_zone": "evacuation",
+                "request_backup": mapped.unit_type or "police",
+            }
+            chosen = dispatch_map[mapped.action_type]
+            unit = self.emergency_units.get(chosen)
+            if unit is None or unit.available <= 0:
+                self.wrong_dispatches += 1
+                return f"dispatch failed: no {chosen} units available", mapped.action_type, True
+
+            unit.available -= 1
+            unit.deployed += 1
+            unit.cooldown_steps = 2
+            effect = 0.04
+            if mapped.action_type == "evacuate_zone":
+                self.civilians_saved += int(max(1, round(2 + self.civilian_risk * 6)))
+                self.civilian_risk = float(np.clip(self.civilian_risk - 0.12, 0.0, 1.0))
+                effect = 0.12
+            elif mapped.action_type == "send_medical_team":
+                self.civilians_saved += int(max(1, round(1 + self.civilian_risk * 3)))
+                self.civilian_risk = float(np.clip(self.civilian_risk - 0.08, 0.0, 1.0))
+                effect = 0.10
+            elif mapped.action_type == "dispatch_fire_truck":
+                self.incident_severity = float(np.clip(self.incident_severity - 0.10, 0.0, 1.0))
+                effect = 0.12
+            elif mapped.action_type == "deploy_drone_scan":
+                self.investigation_targets.update(self.services.keys())
+                effect = 0.07
+
+            if mapped.target_zone and mapped.target_zone not in {"zone_a", "zone_b", "zone_c", "city_core"}:
+                self.wrong_dispatches += 1
+                effect *= 0.3
+
+            self.recent_dispatch_effect += effect
+            self._append_timeline(f"Tactical dispatch: {chosen} unit deployed to {mapped.target_zone or 'unspecified zone'}")
+            return f"{chosen} unit dispatched", mapped.action_type, False
 
         if mapped.action_type == "noop":
             self._append_timeline("Agent paused for observation")
@@ -507,9 +608,20 @@ class IncidentCommanderEnv:
             question=action.question,
             command=action.command,
             note=action.note,
+            unit_type=action.unit_type,
+            target_zone=action.target_zone,
+            priority=action.priority,
+            strategy_level=action.strategy_level,
         )
 
     def _simulate_scenario_drift(self) -> None:
+        for unit in self.emergency_units.values():
+            if unit.cooldown_steps > 0:
+                unit.cooldown_steps -= 1
+            if unit.cooldown_steps == 0 and unit.deployed > 0:
+                unit.available += unit.deployed
+                unit.deployed = 0
+
         if self.scenario.scenario_id == "resource_exhaustion":
             self.scenario.noisy_neighbor_io = float(np.clip(self.scenario.noisy_neighbor_io + 0.04, 0.0, 1.2))
             self.tmp_files.append(f"/tmp/io-spike-{self.timestep}.tmp")
@@ -523,6 +635,34 @@ class IncidentCommanderEnv:
 
         if self.scenario.scenario_id == "regional_outage" and not self.scenario.db_failover_complete:
             self.scenario.cross_zone_packet_loss = float(np.clip(self.scenario.cross_zone_packet_loss + 0.03, 0.0, 0.98))
+
+    def _simulate_disaster_progression(self) -> None:
+        weather_impact = {
+            "clear": 0.00,
+            "windy": 0.04,
+            "storm": 0.08,
+            "heatwave": 0.05,
+        }
+        if self.task.task_id in {"hard", "longhaul", "blackout"}:
+            if self.timestep % 9 == 0 and self.timestep > 0:
+                self.weather_condition = str(self.rng.choice(["clear", "windy", "storm", "heatwave"]))
+
+        escalation = 0.015 + weather_impact.get(self.weather_condition, 0.0)
+        if self.phase in {"surge", "thundering-herd"}:
+            escalation += 0.03
+        if self.recent_dispatch_effect > 0:
+            escalation -= min(0.09, self.recent_dispatch_effect)
+        self.recent_dispatch_effect = max(0.0, self.recent_dispatch_effect * 0.5)
+
+        self.incident_severity = float(np.clip(self.incident_severity + escalation, 0.0, 1.0))
+        self.civilian_risk = float(np.clip(self.civilian_risk + 0.5 * escalation, 0.0, 1.0))
+
+        if self.incident_severity > 0.72:
+            self.incident_type = "compound_outage"
+        elif self.incident_severity > 0.48:
+            self.incident_type = "critical_service_disruption"
+        else:
+            self.incident_type = "infra_outage"
 
     def _inject_scheduled_incident_event(self) -> None:
         # Scheduled shocks make long-horizon tasks non-trivial and improve task separation by difficulty.
@@ -617,6 +757,7 @@ class IncidentCommanderEnv:
 
         if self.load_test_active_steps > 0:
             base *= 1.35
+        base *= 1.0 + (self.incident_severity * 0.12)
         return float(base)
 
     def _effective_traffic_level(self) -> float:
@@ -634,13 +775,15 @@ class IncidentCommanderEnv:
         if self.scenario.scenario_id == "regional_outage" and not self.scenario.db_failover_complete:
             db_penalty += 0.55 * self.scenario.cross_zone_packet_loss
 
+        systemic_pressure = 1.0 + (self.incident_severity * 0.25) + (self.civilian_risk * 0.10)
+
         for name, svc in self.services.items():
             pressure = 1.0
             if name == "db":
                 pressure += db_penalty
             if name == "auth" and self.scenario.scenario_id == "heisenbug" and self.scenario.heisenbug_triggered:
                 pressure += 0.7
-            demand = traffic_profile * base_weights[name] * pressure
+            demand = traffic_profile * base_weights[name] * pressure * systemic_pressure
             if not svc.healthy:
                 demand *= 1.1
             service_loads[name] = demand
@@ -934,6 +1077,14 @@ class IncidentCommanderEnv:
             "ask_developer",
             "load_test",
             "run_command",
+            "declare_emergency",
+            "allocate_resources",
+            "request_national_support",
+            "dispatch_fire_truck",
+            "send_medical_team",
+            "deploy_drone_scan",
+            "evacuate_zone",
+            "request_backup",
             "noop",
         ]
 
@@ -959,6 +1110,13 @@ class IncidentCommanderEnv:
             live_timeline=self.live_timeline[-30:],
             available_actions=self._available_actions(),
             scenario_hint="Root cause is hidden until investigated",
+            incident_type=self.incident_type,
+            incident_severity=round(self.incident_severity, 4),
+            weather_condition=self.weather_condition,
+            civilian_risk=round(self.civilian_risk, 4),
+            emergency_units={k: v.model_copy(deep=True) for k, v in self.emergency_units.items()},
+            strategic_options=["declare_emergency", "allocate_resources", "request_national_support"],
+            tactical_options=["dispatch_fire_truck", "send_medical_team", "deploy_drone_scan", "evacuate_zone", "request_backup"],
         )
 
     def get_state(self) -> Dict[str, object]:
@@ -977,6 +1135,12 @@ class IncidentCommanderEnv:
             "phase": self.phase,
             "open_sockets": self.open_sockets,
             "burn_budget_ratio": round(self.downtime_used / max(1e-6, self.burn_budget_total), 6),
+            "incident_type": self.incident_type,
+            "incident_severity": round(self.incident_severity, 4),
+            "weather_condition": self.weather_condition,
+            "civilian_risk": round(self.civilian_risk, 4),
+            "civilians_saved": self.civilians_saved,
+            "emergency_units": {k: v.model_dump() for k, v in self.emergency_units.items()},
         }
 
     def get_metrics(self) -> Dict[str, object]:
@@ -1010,6 +1174,11 @@ class IncidentCommanderEnv:
             "verification_score": round(verification_score, 6),
             "resilience_score": round(resilience_score, 6),
             "burn_budget_ratio": round(self.downtime_used / max(1e-6, self.burn_budget_total), 6),
+            "incident_severity": round(self.incident_severity, 6),
+            "civilian_risk": round(self.civilian_risk, 6),
+            "civilians_saved": int(self.civilians_saved),
+            "wrong_dispatches": int(self.wrong_dispatches),
+            "delayed_response_steps": int(self.delayed_response_steps),
             "timeline": self.live_timeline,
             "reward_trace": self.reward_trace,
         }
