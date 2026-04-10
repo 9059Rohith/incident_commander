@@ -266,6 +266,19 @@ docker build -t incident-commander -f server/Dockerfile .
 docker run -p 7860:7860 incident-commander
 ```
 
+## Hackathon Readiness (One Command)
+
+Run this pre-submission audit to verify required files, OpenEnv spec mapping, test pass status, and inference logging contract:
+
+```bash
+python scripts/hackathon_readiness.py
+```
+
+Expected result:
+
+- `"overall": "pass"`
+- all checks pass, including `OpenEnv validate`
+
 Validation:
 
 ```bash
