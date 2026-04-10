@@ -15,7 +15,7 @@ tags:
   - agent
   - rl-environment
 license: mit
-short_description: Simulated incident response benchmark for AI platform operations
+short_description: Incident response RL benchmark for AI platform ops
 ---
 
 # Incident Commander OpenEnv
