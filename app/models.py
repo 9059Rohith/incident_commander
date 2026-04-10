@@ -94,6 +94,10 @@ class IncidentCommanderObservation(BaseModel):
     region_status: Dict[str, float] = Field(default_factory=dict)
     dependency_graph: Dict[str, List[str]] = Field(default_factory=dict)
     commitment_mode: str = "adaptive"
+    institutional_trust: float = 1.0
+    economic_stability: float = 1.0
+    legal_risk: float = 0.0
+    misinformation_index: float = 0.0
 
 
 class IncidentCommanderAction(BaseModel):
@@ -119,6 +123,11 @@ class IncidentCommanderAction(BaseModel):
         "declare_emergency",
         "allocate_resources",
         "request_national_support",
+        "issue_public_briefing",
+        "impose_restriction_order",
+        "authorize_emergency_procurement",
+        "counter_misinformation_campaign",
+        "coordinate_cyber_command",
         "dispatch_fire_truck",
         "send_medical_team",
         "deploy_drone_scan",
@@ -162,6 +171,10 @@ class IncidentCommanderReward(BaseModel):
     wrong_dispatch_penalty: float = 0.0
     commitment_penalty: float = 0.0
     graph_outage_penalty: float = 0.0
+    trust_bonus: float = 0.0
+    legal_risk_penalty: float = 0.0
+    economy_penalty: float = 0.0
+    misinformation_penalty: float = 0.0
 
 
 class TaskConfig(BaseModel):

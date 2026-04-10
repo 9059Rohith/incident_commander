@@ -116,3 +116,20 @@ def test_forensic_and_quickstart_endpoints_exist() -> None:
     assert "failure_taxonomy" in forensic_payload
     assert isinstance(quickstart_payload.get("steps", []), list)
     assert quickstart_payload.get("expected_signals", {}).get("counterfactual_diagnostics", False) is True
+
+
+def test_governance_report_endpoint_exposes_macro_signals() -> None:
+    client = TestClient(app)
+    reset_resp = client.post("/reset", params={"task_id": "hard", "seed": 42})
+    reset_resp.raise_for_status()
+
+    response = client.get("/governance_report", params={"task_id": "hard"})
+    response.raise_for_status()
+    payload = response.json()
+
+    assert "governance_score" in payload
+    signals = payload.get("governance_signals", {})
+    assert "institutional_trust" in signals
+    assert "economic_stability" in signals
+    assert "legal_risk" in signals
+    assert "misinformation_index" in signals

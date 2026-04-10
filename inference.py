@@ -39,7 +39,9 @@ SYSTEM_PROMPT = (
     "Return only strict JSON with keys action_type, target_service, delta_instances, fallback_service, config_key, config_value, n_lines, question, note. "
     "Valid action_type values are get_metrics, list_processes, read_last_n_logs, check_network_connectivity, failover_database, restart_service, rollback_deployment, "
     "scale_up_replicas, edit_config_line, run_healthcheck, ask_developer, load_test, run_command, declare_emergency, allocate_resources, "
-    "request_national_support, dispatch_fire_truck, send_medical_team, deploy_drone_scan, evacuate_zone, request_backup, noop."
+    "request_national_support, issue_public_briefing, impose_restriction_order, authorize_emergency_procurement, "
+    "counter_misinformation_campaign, coordinate_cyber_command, dispatch_fire_truck, send_medical_team, deploy_drone_scan, "
+    "evacuate_zone, request_backup, noop."
 )
 
 client = OpenAI(api_key=API_KEY or "", base_url=API_BASE_URL)
@@ -168,6 +170,10 @@ def _compact_obs(obs: Dict[str, Any]) -> Dict[str, Any]:
         "incident_type": obs.get("incident_type", "infra_outage"),
         "incident_severity": obs.get("incident_severity", 0.0),
         "civilian_risk": obs.get("civilian_risk", 0.0),
+        "institutional_trust": obs.get("institutional_trust", 1.0),
+        "economic_stability": obs.get("economic_stability", 1.0),
+        "legal_risk": obs.get("legal_risk", 0.0),
+        "misinformation_index": obs.get("misinformation_index", 0.0),
         "services": compact_services,
         "active_incidents": incidents,
         "symptoms": obs.get("symptoms", [])[:6],

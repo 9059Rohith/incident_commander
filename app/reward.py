@@ -34,6 +34,10 @@ class RewardCalculator:
         wrong_dispatches: int,
         commitment_switches: int,
         graph_outage_ratio: float,
+        institutional_trust: float,
+        legal_risk: float,
+        economic_stability: float,
+        misinformation_index: float,
     ) -> IncidentCommanderReward:
         uptime = max(0.0, min(1.0, uptime_ratio))
         latency = max(0.0, min(1.0, 1.0 - obs.p95_latency / 700.0))
@@ -52,6 +56,10 @@ class RewardCalculator:
         wrong_dispatch_penalty = max(0.0, min(0.20, 0.06 * wrong_dispatches))
         commitment_penalty = max(0.0, min(0.18, 0.025 * commitment_switches))
         graph_outage_penalty = max(0.0, min(0.22, 0.24 * graph_outage_ratio))
+        trust_bonus = max(0.0, min(0.16, 0.16 * institutional_trust))
+        legal_risk_penalty = max(0.0, min(0.24, 0.18 * legal_risk))
+        economy_penalty = max(0.0, min(0.20, 0.22 * max(0.0, 1.0 - economic_stability)))
+        misinformation_penalty = max(0.0, min(0.18, 0.20 * misinformation_index))
 
         total = success - latency_penalty - resource_waste_penalty - incorrect_action_penalty - safety_penalty
         if action.action_type == "noop" and unresolved_critical > 0:
@@ -96,6 +104,10 @@ class RewardCalculator:
         total -= wrong_dispatch_penalty
         total -= commitment_penalty
         total -= graph_outage_penalty
+        total += trust_bonus
+        total -= legal_risk_penalty
+        total -= economy_penalty
+        total -= misinformation_penalty
 
         total = max(0.0, min(1.0, total))
         return IncidentCommanderReward(
@@ -117,4 +129,8 @@ class RewardCalculator:
             wrong_dispatch_penalty=round(wrong_dispatch_penalty, 4),
             commitment_penalty=round(commitment_penalty, 4),
             graph_outage_penalty=round(graph_outage_penalty, 4),
+            trust_bonus=round(trust_bonus, 4),
+            legal_risk_penalty=round(legal_risk_penalty, 4),
+            economy_penalty=round(economy_penalty, 4),
+            misinformation_penalty=round(misinformation_penalty, 4),
         )

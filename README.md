@@ -113,6 +113,7 @@ Each step returns a structured snapshot containing:
 | `step`, `step_budget` | Current position and episode horizon |
 | `traffic_level` | Demand pressure for the current step |
 | `uptime`, `p95_latency`, `sla_breaches` | Core operational metrics |
+| `institutional_trust`, `economic_stability`, `legal_risk`, `misinformation_index` | Governance and legitimacy signals under crisis pressure |
 | `cost_per_step` | Accumulated operating cost |
 | `last_action_result` | Result of the previous action |
 | `phase` | Current episode phase |
@@ -140,6 +141,11 @@ The environment supports these actions:
 | `ask_developer` | Request a human hint |
 | `load_test` | Reproduce under load |
 | `run_command` | Simulated operational command |
+| `issue_public_briefing` | Stabilize trust and reduce misinformation pressure |
+| `impose_restriction_order` | Reduce incident pressure with legal and economic tradeoffs |
+| `authorize_emergency_procurement` | Accelerate response capacity at governance cost |
+| `counter_misinformation_campaign` | Actively suppress misinformation surges |
+| `coordinate_cyber_command` | Harden infrastructure links under disruption |
 | `noop` | Do nothing |
 
 The environment also exposes a `visualize` endpoint that returns a compact ASCII dashboard for quick manual inspection. That makes it easier to compare the current service state against the task description during debugging.
@@ -171,6 +177,7 @@ The main endpoints are:
 - `GET /health`
 - `GET /metrics`
 - `GET /report`
+- `GET /governance_report`
 - `GET /visualize`
 - `GET /baseline`
 - `GET /benchmark_matrix`
@@ -187,6 +194,7 @@ Useful endpoint notes:
 - `/grade` evaluates the current episode state with the task-specific grader.
 - `/baseline` and `/benchmark_matrix` run the built-in baseline controller for quick comparison.
 - `/report` combines grade, metrics, and unresolved incident context in one payload.
+- `/governance_report` summarizes macro trust, legal, and misinformation stability.
 - `/replay` and `/evaluation_report` are useful when you want deterministic inspection artifacts rather than a single score.
 - `/judge_pack` and `/showcase` are judge-facing inspection tools for fast review.
 

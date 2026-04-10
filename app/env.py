@@ -149,6 +149,10 @@ class IncidentCommanderEnv:
         self.commitment_mode = "adaptive"
         self.last_strategy_level: Optional[str] = None
         self.commitment_switches = 0
+        self.institutional_trust = 0.78
+        self.economic_stability = 0.82
+        self.legal_risk = 0.14
+        self.misinformation_index = 0.20
 
         self.last_observed_metrics: Dict[str, Tuple[Optional[float], Optional[float]]] = {}
 
@@ -227,6 +231,10 @@ class IncidentCommanderEnv:
         self.commitment_mode = "adaptive"
         self.last_strategy_level = None
         self.commitment_switches = 0
+        self.institutional_trust = 0.78
+        self.economic_stability = 0.82
+        self.legal_risk = 0.14
+        self.misinformation_index = 0.20
         self.civilians_saved = 0
         self.wrong_dispatches = 0
         self.delayed_response_steps = 0
@@ -351,6 +359,10 @@ class IncidentCommanderEnv:
             wrong_dispatches=self.wrong_dispatches,
             commitment_switches=self.commitment_switches,
             graph_outage_ratio=self.link_outage_ratio,
+            institutional_trust=self.institutional_trust,
+            legal_risk=self.legal_risk,
+            economic_stability=self.economic_stability,
+            misinformation_index=self.misinformation_index,
         )
 
         self.last_reward = reward
@@ -374,6 +386,10 @@ class IncidentCommanderEnv:
                 "civilian_risk": round(self.civilian_risk, 4),
                 "incident_severity": round(self.incident_severity, 4),
                 "civilians_saved": self.civilians_saved,
+                "institutional_trust": round(self.institutional_trust, 4),
+                "economic_stability": round(self.economic_stability, 4),
+                "legal_risk": round(self.legal_risk, 4),
+                "misinformation_index": round(self.misinformation_index, 4),
             }
         )
         self.action_history.append((self.timestep, clean_action.action_type, clean_action.target_service))
@@ -455,8 +471,43 @@ class IncidentCommanderEnv:
             for unit in self.emergency_units.values():
                 unit.available += 1
             self.recent_dispatch_effect += 0.08
+            self.legal_risk = float(np.clip(self.legal_risk + 0.02, 0.0, 1.0))
+            self.institutional_trust = float(np.clip(self.institutional_trust + 0.02, 0.0, 1.0))
             self._append_timeline("Strategic action: external support requested")
             return "national support requested; reserve units added", "request_national_support", False
+
+        if mapped.action_type == "issue_public_briefing":
+            self.institutional_trust = float(np.clip(self.institutional_trust + 0.07, 0.0, 1.0))
+            self.misinformation_index = float(np.clip(self.misinformation_index - 0.10, 0.0, 1.0))
+            self._append_timeline("Strategic action: public briefing delivered with transparent metrics")
+            return "public briefing issued", "issue_public_briefing", False
+
+        if mapped.action_type == "impose_restriction_order":
+            self.incident_severity = float(np.clip(self.incident_severity - 0.09, 0.0, 1.0))
+            self.civilian_risk = float(np.clip(self.civilian_risk - 0.07, 0.0, 1.0))
+            self.economic_stability = float(np.clip(self.economic_stability - 0.06, 0.0, 1.0))
+            self.legal_risk = float(np.clip(self.legal_risk + 0.06, 0.0, 1.0))
+            self._append_timeline("Strategic action: temporary movement restrictions enacted")
+            return "restriction order imposed", "impose_restriction_order", False
+
+        if mapped.action_type == "authorize_emergency_procurement":
+            self.recent_dispatch_effect += 0.09
+            self.economic_stability = float(np.clip(self.economic_stability - 0.03, 0.0, 1.0))
+            self.legal_risk = float(np.clip(self.legal_risk + 0.04, 0.0, 1.0))
+            self._append_timeline("Strategic action: emergency procurement approved")
+            return "emergency procurement approved", "authorize_emergency_procurement", False
+
+        if mapped.action_type == "counter_misinformation_campaign":
+            self.misinformation_index = float(np.clip(self.misinformation_index - 0.12, 0.0, 1.0))
+            self.institutional_trust = float(np.clip(self.institutional_trust + 0.05, 0.0, 1.0))
+            self._append_timeline("Strategic action: misinformation counter-campaign launched")
+            return "counter-misinformation campaign launched", "counter_misinformation_campaign", False
+
+        if mapped.action_type == "coordinate_cyber_command":
+            self.link_outage_ratio = float(np.clip(self.link_outage_ratio - 0.12, 0.0, 1.0))
+            self.legal_risk = float(np.clip(self.legal_risk + 0.03, 0.0, 1.0))
+            self._append_timeline("Strategic action: cyber command coordinating infrastructure hardening")
+            return "cyber command coordination active", "coordinate_cyber_command", False
 
         if mapped.action_type in {"dispatch_fire_truck", "send_medical_team", "deploy_drone_scan", "evacuate_zone", "request_backup"}:
             dispatch_map = {
@@ -707,7 +758,16 @@ class IncidentCommanderEnv:
             burst = float(self.rng.uniform(0.05, 0.12))
             self.incident_severity = float(np.clip(self.incident_severity + burst, 0.0, 1.0))
             self.civilian_risk = float(np.clip(self.civilian_risk + (burst * 0.7), 0.0, 1.0))
+            self.misinformation_index = float(np.clip(self.misinformation_index + (burst * 0.9), 0.0, 1.0))
             self._append_timeline("Adversarial shift: unexpected secondary outage wave")
+
+        trust_decay = (self.incident_severity * 0.03) + (self.misinformation_index * 0.02)
+        if self.weather_condition == "storm":
+            trust_decay += 0.01
+        self.institutional_trust = float(np.clip(self.institutional_trust - trust_decay, 0.0, 1.0))
+        self.economic_stability = float(np.clip(self.economic_stability - (0.015 + 0.02 * self.incident_severity), 0.0, 1.0))
+        self.legal_risk = float(np.clip(self.legal_risk + max(0.0, self.incident_severity - 0.6) * 0.04, 0.0, 1.0))
+        self.misinformation_index = float(np.clip(self.misinformation_index + (0.01 + 0.03 * self.civilian_risk), 0.0, 1.0))
 
         self._simulate_topology_disruptions()
 
@@ -1167,6 +1227,11 @@ class IncidentCommanderEnv:
             "declare_emergency",
             "allocate_resources",
             "request_national_support",
+            "issue_public_briefing",
+            "impose_restriction_order",
+            "authorize_emergency_procurement",
+            "counter_misinformation_campaign",
+            "coordinate_cyber_command",
             "dispatch_fire_truck",
             "send_medical_team",
             "deploy_drone_scan",
@@ -1202,11 +1267,24 @@ class IncidentCommanderEnv:
             weather_condition=self.weather_condition,
             civilian_risk=round(self.civilian_risk, 4),
             emergency_units={k: v.model_copy(deep=True) for k, v in self.emergency_units.items()},
-            strategic_options=["declare_emergency", "allocate_resources", "request_national_support"],
+            strategic_options=[
+                "declare_emergency",
+                "allocate_resources",
+                "request_national_support",
+                "issue_public_briefing",
+                "impose_restriction_order",
+                "authorize_emergency_procurement",
+                "counter_misinformation_campaign",
+                "coordinate_cyber_command",
+            ],
             tactical_options=["dispatch_fire_truck", "send_medical_team", "deploy_drone_scan", "evacuate_zone", "request_backup"],
             region_status={k: round(v, 4) for k, v in self.region_status.items()},
             dependency_graph={k: list(v) for k, v in self.dependency_graph.items()},
             commitment_mode=self.commitment_mode,
+            institutional_trust=round(self.institutional_trust, 4),
+            economic_stability=round(self.economic_stability, 4),
+            legal_risk=round(self.legal_risk, 4),
+            misinformation_index=round(self.misinformation_index, 4),
         )
 
     def get_state(self) -> Dict[str, object]:
@@ -1236,6 +1314,10 @@ class IncidentCommanderEnv:
             "commitment_mode": self.commitment_mode,
             "commitment_switches": self.commitment_switches,
             "link_outage_ratio": round(self.link_outage_ratio, 6),
+            "institutional_trust": round(self.institutional_trust, 6),
+            "economic_stability": round(self.economic_stability, 6),
+            "legal_risk": round(self.legal_risk, 6),
+            "misinformation_index": round(self.misinformation_index, 6),
         }
 
     def get_metrics(self) -> Dict[str, object]:
@@ -1276,6 +1358,11 @@ class IncidentCommanderEnv:
             "delayed_response_steps": int(self.delayed_response_steps),
             "commitment_switches": int(self.commitment_switches),
             "link_outage_ratio": round(self.link_outage_ratio, 6),
+            "institutional_trust": round(self.institutional_trust, 6),
+            "economic_stability": round(self.economic_stability, 6),
+            "legal_risk": round(self.legal_risk, 6),
+            "misinformation_index": round(self.misinformation_index, 6),
+            "governance_score": round(max(0.0, min(1.0, (0.45 * self.institutional_trust) + (0.35 * self.economic_stability) + (0.20 * (1.0 - self.legal_risk)))), 6),
             "timeline": self.live_timeline,
             "reward_trace": self.reward_trace,
         }

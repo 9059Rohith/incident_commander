@@ -336,6 +336,7 @@ def _judge_pack_snapshot() -> Dict[str, object]:
             "/evaluation_report",
             "/benchmark_matrix",
             "/forensic_audit",
+            "/governance_report",
             "/judge_quickstart",
             "/showcase",
         ],
@@ -473,6 +474,34 @@ async def report(task_id: str = "easy"):
     }
 
 
+@app.get("/governance_report")
+async def governance_report(task_id: str = "easy"):
+    env = _get_env(task_id)
+    metrics_payload = env.get_metrics()
+    state = env.get_state()
+    return {
+        "task_id": task_id,
+        "governance_score": metrics_payload.get("governance_score", 0.0),
+        "governance_signals": {
+            "institutional_trust": metrics_payload.get("institutional_trust", 0.0),
+            "economic_stability": metrics_payload.get("economic_stability", 0.0),
+            "legal_risk": metrics_payload.get("legal_risk", 0.0),
+            "misinformation_index": metrics_payload.get("misinformation_index", 0.0),
+        },
+        "incident_context": {
+            "incident_type": state.get("incident_type"),
+            "incident_severity": state.get("incident_severity"),
+            "civilian_risk": state.get("civilian_risk"),
+            "commitment_mode": state.get("commitment_mode"),
+        },
+        "advice": {
+            "public_legitimacy": "Use issue_public_briefing or counter_misinformation_campaign when trust is low.",
+            "rights_tradeoff": "Use impose_restriction_order carefully; it can reduce risk while increasing legal pressure.",
+            "resilience": "Use coordinate_cyber_command under high topology disruption.",
+        },
+    }
+
+
 @app.get("/visualize")
 async def visualize(task_id: str = "easy"):
     env = _get_env(task_id)
@@ -596,6 +625,7 @@ async def judge_quickstart():
             "GET /benchmark_matrix?episodes=3",
             "GET /evaluation_report?policy=baseline&episodes_per_task=3&include_hidden=true&hidden_weight=0.35",
             "GET /forensic_audit?task_id=hard&seed=42&policy=baseline",
+            "GET /governance_report?task_id=hard",
             "GET /judge_pack",
         ],
         "expected_signals": {
@@ -603,6 +633,7 @@ async def judge_quickstart():
             "hidden_track_enabled": True,
             "anti_gaming_failure_taxonomy": True,
             "counterfactual_diagnostics": True,
+            "governance_metrics_enabled": True,
         },
     }
 

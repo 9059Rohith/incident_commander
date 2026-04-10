@@ -6,14 +6,15 @@ colorTo: gray
 sdk: docker
 description: >
   Incident Commander OpenEnv where an LLM agent performs black-box SRE
-  investigation and multi-unit emergency coordination across a stateful
-  frontend-auth-db crisis simulation.
+  investigation, crisis governance, and multi-unit emergency coordination
+  across a stateful frontend-auth-db crisis simulation.
 author: Rohith Kumar
 observation_space:
   type: text
   description: >
     Service topology snapshot with noisy metrics, masked incidents, timeline,
-    and operational hints for black-box incident response.
+    and governance signals (trust, legal risk, misinformation) for black-box
+    incident response.
 
 action_space:
   type: structured
@@ -33,6 +34,7 @@ endpoints:
   metrics: /metrics
   baseline: /baseline
   report: /report
+  governance_report: /governance_report
   benchmark_matrix: /benchmark_matrix
   replay: /replay
   evaluation_report: /evaluation_report
